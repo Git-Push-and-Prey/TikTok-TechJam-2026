@@ -32,7 +32,7 @@ fi
 export TF_VAR_ark_api_key="$ARK_API_KEY"
 export TF_VAR_app_auth_token="$APP_AUTH_TOKEN"
 export TF_VAR_ark_model="$ARK_MODEL"
-export TF_VAR_ark_base_url="${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}"
+export TF_VAR_ark_base_url="${ARK_BASE_URL:-https://ark.ap-southeast.bytepluses.com/api/v3}"
 
 terraform -chdir=deploy/volcengine init
 terraform -chdir=deploy/volcengine apply

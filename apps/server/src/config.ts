@@ -43,7 +43,7 @@ const envSchema = z.object({
   ARK_BASE_URL: z
     .string()
     .url()
-    .default("https://ark.cn-beijing.volces.com/api/v3"),
+    .default("https://ark.ap-southeast.bytepluses.com/api/v3"),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
 });
 
