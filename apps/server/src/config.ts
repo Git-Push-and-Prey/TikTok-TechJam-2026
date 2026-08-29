@@ -8,6 +8,7 @@ const envSchema = z.object({
   LOG_LEVEL: z.string().default("info"),
   APP_DATA_DIR: z.string().default(path.resolve(".data")),
   AGENT_WORKSPACE_ROOT: z.string().default(path.resolve("workspaces")),
+  LOGS_DIR: z.string().default(path.resolve("logs")),
   CODEX_HOME: z.string().default(path.resolve("codex-home")),
   CODEX_BIN: z.string().default("codex"),
   CODEX_SANDBOX_MODE: z
@@ -70,6 +71,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     logLevel: env.LOG_LEVEL,
     dataDirectory: path.resolve(env.APP_DATA_DIR),
     workspaceRoot: path.resolve(env.AGENT_WORKSPACE_ROOT),
+    logsDir: path.resolve(env.LOGS_DIR),
     codexHome: path.resolve(env.CODEX_HOME),
     codexBin: env.CODEX_BIN,
     codexSandboxMode: env.CODEX_SANDBOX_MODE,

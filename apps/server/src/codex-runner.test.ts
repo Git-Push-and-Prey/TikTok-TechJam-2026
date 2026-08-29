@@ -70,4 +70,40 @@ describe("Codex runner protocol", () => {
     expect(parsed.messages).toEqual(["Done."]);
     expect(parsed.usage).toEqual({ inputTokens: 10, outputTokens: 4 });
   });
+
+  it("emits a tool_call event for non-agent_message items and an error event on failures", () => {
+    const parsed = {
+      messages: [] as string[],
+      threadId: null as string | null,
+      usage: null,
+      errors: [] as string[],
+    };
+    const events: unknown[] = [];
+    const onEvent = (event: unknown) => events.push(event);
+
+    parseCodexEventLine(
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "command_execution", command: "npm test", exit_code: 0 },
+      }),
+      parsed,
+      onEvent,
+    );
+    parseCodexEventLine(
+      JSON.stringify({ type: "error", message: "Codex ran out of turns" }),
+      parsed,
+      onEvent,
+    );
+
+    expect(events).toEqual([
+      {
+        kind: "tool_call",
+        itemType: "command_execution",
+        status: "succeeded",
+        summary: "npm test",
+        detail: { type: "command_execution", command: "npm test", exit_code: 0 },
+      },
+      { kind: "error", message: "Codex ran out of turns" },
+    ]);
+  });
 });

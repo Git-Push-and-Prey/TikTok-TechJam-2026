@@ -68,11 +68,22 @@ export interface RunnerResult {
   usage: RunUsage | null;
 }
 
+export type RunnerEvent =
+  | {
+      kind: "tool_call";
+      itemType: string;
+      status: string;
+      summary: string;
+      detail: unknown;
+    }
+  | { kind: "error"; message: string };
+
 export interface RunnerRequest {
   agentId: string;
   workspacePath: string;
   prompt: string;
   threadId: string | null;
+  onEvent?: (event: RunnerEvent) => void;
 }
 
 export interface AgentRunner {

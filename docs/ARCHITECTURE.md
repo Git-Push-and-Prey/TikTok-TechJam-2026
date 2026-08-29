@@ -13,6 +13,9 @@ flowchart LR
     Runner -->|ECS| Process["Codex child process"]
     Container --> OpenRouter["OpenRouter"]
     Process --> OpenRouter
+    Service --> SessionLogger["SessionLogger"]
+    SessionLogger --> Logs["logs/AgentID.log"]
+    Logs --> LogViewer["Log Viewer\n(apps/log-viewer, separate service)"]
 ```
 
 ## Components
@@ -61,6 +64,19 @@ one process only.
 
 Both providers use argv-only process execution, bound output and time, resume
 the stored Codex thread, and escalate termination after a grace period.
+
+### Session logging
+
+`SessionLogger` appends a redacted JSONL entry — user message, tool call,
+agent response, or error — to `logs/AgentID.log` for every Run, keyed by
+Agent (a "session" is one Agent's whole conversation). `AgentRunner`
+implementations report tool-call and error events as they parse Codex's
+`--json` stream, via an optional `onEvent` callback on `RunnerRequest`. The
+`apps/log-viewer` package is a separately hosted, minimal Fastify service
+that reads the same `LOGS_DIR` and serves a small static UI for listing
+sessions and filtering one by keyword — it has no dependency on the main
+server or its API. See [SESSION_LOGGING.md](SESSION_LOGGING.md) for the full
+data flow, file format, and redaction rules.
 
 ## Deployment profiles
 

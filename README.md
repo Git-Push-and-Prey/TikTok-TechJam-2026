@@ -9,8 +9,9 @@ Volcengine ECS.
 
 > [!WARNING]
 > This is a single-user proof of concept. It intentionally has no identity,
-> tracing, audit, or hardened sandbox middleware. Do not use production data or
-> credentials. See [SECURITY.md](SECURITY.md).
+> authorization, or hardened sandbox middleware, and session logs are not
+> access-controlled beyond an optional shared token. Do not use production
+> data or credentials. See [SECURITY.md](SECURITY.md).
 
 ## Screenshots
 
@@ -30,6 +31,8 @@ Volcengine ECS.
 - Persistent Agent workspaces and Codex sessions
 - Disposable Docker, Colima, or Podman container for each local turn
 - Docker and Terraform deployment paths for Volcengine ECS
+- Session-based logging (one file per Agent conversation) with a separately
+  hosted log viewer for filtering by session or keyword
 
 ## Requirements
 
@@ -169,7 +172,19 @@ Use local paths in `.env` when running outside Docker:
 APP_DATA_DIR=.data
 AGENT_WORKSPACE_ROOT=workspaces
 CODEX_HOME=codex-home
+LOGS_DIR=logs
 ```
+
+### Session logs
+
+Every Agent conversation is written to its own append-only JSONL file under
+`LOGS_DIR` (`<agentId>.log`): each line is a user message, tool call, agent
+response, or error, in order. `npm run dev` also starts a separately hosted
+log viewer at <http://localhost:4100> (`apps/log-viewer`) that lists sessions
+and lets you filter one by keyword. It reads `LOGS_DIR` directly, so it can
+be deployed on its own — see [Docker Compose](#docker-compose) for running it
+alongside the main app, and [docs/SESSION_LOGGING.md](docs/SESSION_LOGGING.md)
+for how it works end to end.
 
 ## Deployment
 
@@ -204,6 +219,8 @@ cp deploy/volcengine/terraform.tfvars.example \
 | `CODEX_SANDBOX_MODE` | `workspace-write` | Codex inner sandbox mode. |
 | `CODEX_TIMEOUT_MS` | `600000` | Maximum duration of one turn. |
 | `LOCAL_POC_DATA_ROOT` | Platform-specific | Local metadata, workspace, and session directory. |
+| `LOGS_DIR` | `./logs` | Session log directory, shared between the server and the log viewer. |
+| `LOG_VIEWER_AUTH_TOKEN` | Empty | Shared token gating the log viewer's API when set. |
 
 See [.env.example](.env.example) for all Runtime and resource-limit options.
 
@@ -237,6 +254,7 @@ docker compose config
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
+- [Session logging architecture](docs/SESSION_LOGGING.md)
 - [Local POC](docs/LOCAL_POC.md)
 - [Deployment](docs/DEPLOYMENT.md)
 - [Hackathon extension guide](docs/HACKATHON_EXTENSION_GUIDE.md)

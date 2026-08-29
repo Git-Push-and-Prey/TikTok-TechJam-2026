@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { AppConfig } from "./config.js";
 import { isOpenRouterConfigured } from "./config.js";
 import { HttpError, RunCancelledError } from "./errors.js";
+import { SessionLogger, type SessionLogContext } from "./session-logger.js";
 import { JsonStore } from "./store.js";
 import type {
   Agent,
@@ -24,11 +25,13 @@ export class AgentService {
     private readonly store: JsonStore,
     private readonly workspaces: WorkspaceManager,
     private readonly runner: AgentRunner,
+    private readonly sessionLogger: SessionLogger,
   ) {}
 
   async initialize(): Promise<void> {
     await this.store.initialize();
     await this.workspaces.initialize();
+    await this.sessionLogger.initialize();
     await this.store.mutate((database) => {
       for (const run of database.runs) {
         if (run.status === "queued" || run.status === "running") {
@@ -201,6 +204,10 @@ export class AgentService {
       storedAgent.updatedAt = timestamp;
       return snapshot;
     });
+    void this.sessionLogger.logUserMessage(
+      { agentId, agentName: agentAtStart.name, runId },
+      prompt,
+    );
     const execution = this.executeRun(agentAtStart, run);
     this.activeExecutions.set(agentId, execution);
     void execution
@@ -233,6 +240,11 @@ export class AgentService {
   }
 
   private async executeRun(agentAtStart: Agent, run: AgentRun): Promise<void> {
+    const logContext: SessionLogContext = {
+      agentId: agentAtStart.id,
+      agentName: agentAtStart.name,
+      runId: run.id,
+    };
     await this.store.mutate((database) => {
       const storedRun = database.runs.find((item) => item.id === run.id);
       if (storedRun) {
@@ -249,7 +261,15 @@ export class AgentService {
         workspacePath: agentAtStart.workspacePath,
         prompt: run.prompt,
         threadId: agentAtStart.codexThreadId,
+        onEvent: (event) => {
+          if (event.kind === "tool_call") {
+            void this.sessionLogger.logToolCall(logContext, event);
+          } else {
+            void this.sessionLogger.logError(logContext, event.message);
+          }
+        },
       });
+      void this.sessionLogger.logAgentResponse(logContext, result.output, result.usage);
       const completedAt = now();
       await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === run.id);
@@ -276,6 +296,10 @@ export class AgentService {
       const completedAt = now();
       const cancelled = error instanceof RunCancelledError;
       const message = error instanceof Error ? error.message : String(error);
+      void this.sessionLogger.logError(
+        logContext,
+        cancelled ? "Run cancelled by user" : message,
+      );
       await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === run.id);
         const agent = database.agents.find((item) => item.id === agentAtStart.id);
