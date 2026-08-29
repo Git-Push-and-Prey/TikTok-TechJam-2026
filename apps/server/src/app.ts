@@ -5,10 +5,12 @@ import { timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { AppConfig } from "./config.js";
+import type { CredentialService } from "./credential-service.js";
 import { HttpError } from "./errors.js";
 import type { AgentService } from "./agent-service.js";
 
 const agentIdParams = z.object({ id: z.string().uuid() });
+const credentialParams = z.object({ id: z.string().uuid(), keyId: z.string().uuid() });
 const runIdParams = z.object({ id: z.string().uuid() });
 const createAgentBody = z.object({
   name: z.string().trim().min(1).max(80),
@@ -22,10 +24,14 @@ const updateAgentBody = createAgentBody.partial().refine(
 const messageBody = z.object({
   content: z.string().trim().min(1).max(50_000),
 });
+const revocationBody = z.object({
+  reason: z.string().trim().min(1).max(500).optional(),
+});
 
 export async function createApp(
   config: AppConfig,
   service: AgentService,
+  credentials?: CredentialService,
 ): Promise<FastifyInstance> {
   const app = Fastify({
     logger: {
@@ -43,8 +49,13 @@ export async function createApp(
   });
 
   app.addHook("onRequest", async (request, reply) => {
+    const agentKeyMessageRequest =
+      request.method === "POST" &&
+      /^\/api\/agents\/[0-9a-f-]{36}\/messages(?:\?.*)?$/i.test(request.url) &&
+      request.headers.authorization?.startsWith("AgentKey ");
     if (
       !config.authToken ||
+      agentKeyMessageRequest ||
       !request.url.startsWith("/api/") ||
       request.url === "/api/health" ||
       request.url === "/api/auth"
@@ -116,9 +127,46 @@ export async function createApp(
     return { runs: service.getRuns(id) };
   });
 
+  app.post("/api/agents/:id/credentials", async (request, reply) => {
+    const { id } = agentIdParams.parse(request.params);
+    if (!credentials?.isConfigured()) throw new HttpError(503, "Agent credentials are not configured");
+    return reply.code(201).send(await credentials.createCredential(id));
+  });
+
+  app.get("/api/agents/:id/credentials", async (request) => {
+    const { id } = agentIdParams.parse(request.params);
+    service.getAgent(id);
+    if (!credentials?.isConfigured()) throw new HttpError(503, "Agent credentials are not configured");
+    return { credentials: credentials.listCredentials(id) };
+  });
+
+  app.get("/api/agents/:id/credentials/audit", async (request) => {
+    const { id } = agentIdParams.parse(request.params);
+    service.getAgent(id);
+    if (!credentials?.isConfigured()) throw new HttpError(503, "Agent credentials are not configured");
+    return { events: credentials.getAuditEvents(id) };
+  });
+
+  app.post("/api/agents/:id/credentials/:keyId/rotate", async (request) => {
+    const { id, keyId } = credentialParams.parse(request.params);
+    if (!credentials?.isConfigured()) throw new HttpError(503, "Agent credentials are not configured");
+    return credentials.rotateCredential(id, keyId);
+  });
+
+  app.post("/api/agents/:id/credentials/:keyId/revoke", async (request) => {
+    const { id, keyId } = credentialParams.parse(request.params);
+    const body = revocationBody.parse(request.body);
+    if (!credentials?.isConfigured()) throw new HttpError(503, "Agent credentials are not configured");
+    return { credential: await credentials.revokeCredential(id, keyId, body.reason ?? null) };
+  });
+
   app.post("/api/agents/:id/messages", async (request, reply) => {
     const { id } = agentIdParams.parse(request.params);
     const body = messageBody.parse(request.body);
+    if (request.headers.authorization?.startsWith("AgentKey ")) {
+      if (!credentials?.isConfigured()) throw new HttpError(503, "Agent credentials are not configured");
+      await credentials.verifyCredential(id, request.headers.authorization);
+    }
     const result = await service.sendMessage(id, body.content);
     return reply.code(202).send(result);
   });

@@ -83,5 +83,5 @@ variable "ark_model" {
 variable "ark_base_url" {
   description = "Ark OpenAI-compatible API base URL."
   type        = string
-  default     = "https://ark.cn-beijing.volces.com/api/v3"
+  default     = "https://ark.ap-southeast.bytepluses.com/api/v3"
 }

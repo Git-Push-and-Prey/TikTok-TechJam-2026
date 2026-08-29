@@ -1,7 +1,11 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import type { AppConfig } from "./config.js";
-import { buildCodexArgs, parseCodexEventLine } from "./codex-runner.js";
+import {
+  buildCodexArgs,
+  describeCodexFailure,
+  parseCodexEventLine,
+} from "./codex-runner.js";
 import { RunCancelledError } from "./errors.js";
 import type {
   AgentRunner,
@@ -223,7 +227,7 @@ export class ContainerCodexRunner implements AgentRunner {
             " Runtime exited with code " +
             exitCode +
             ": " +
-            detail,
+            describeCodexFailure(detail),
         );
       }
       const output = parsed.messages.at(-1)?.trim();
