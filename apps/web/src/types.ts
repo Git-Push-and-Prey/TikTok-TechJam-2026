@@ -39,9 +39,9 @@ export interface AgentRun {
 }
 
 export interface SystemInfo {
-  arkConfigured: boolean;
-  arkBaseUrl: string;
-  arkModel: string | null;
+  openrouterConfigured: boolean;
+  openrouterBaseUrl: string;
+  openrouterModel: string | null;
   codexAvailable: boolean;
   codexSandboxMode: string;
   runtimeProvider: "local-process" | "container";

@@ -2,7 +2,7 @@
 
 A minimal Agent platform for three-day middleware hackathons. It provides Agent
 CRUD, a browser Playground, persistent workspaces, and Codex CLI backed by the
-Volcengine Ark Responses API.
+OpenRouter API.
 
 Run it locally with Docker, Colima, or rootless Podman, or deploy it to
 Volcengine ECS.
@@ -36,7 +36,7 @@ Volcengine ECS.
 - Node.js 22+
 - npm 10+
 - Docker, Colima, or Podman
-- A Volcengine Ark API key and endpoint that supports the Responses API
+- An OpenRouter API key (free, no credit card, at https://openrouter.ai/keys)
 
 Codex CLI is included in the Runtime image and is not required on the host.
 
@@ -68,8 +68,7 @@ Skip this step when already working from the repository root.
 ### 3. Start the POC
 
 ```bash
-ARK_API_KEY=your-ark-api-key \
-ARK_MODEL=ep-your-endpoint-id \
+OPENROUTER_API_KEY=your-openrouter-api-key \
 npm run poc
 ```
 
@@ -116,8 +115,7 @@ Force Podman when multiple engines are installed:
 
 ```bash
 CONTAINER_ENGINE=podman \
-ARK_API_KEY=your-ark-api-key \
-ARK_MODEL=ep-your-endpoint-id \
+OPENROUTER_API_KEY=your-openrouter-api-key \
 npm run poc
 ```
 
@@ -137,8 +135,7 @@ Create and edit the configuration:
 Required values in `.env`:
 
 ```dotenv
-ARK_API_KEY=your-ark-api-key
-ARK_MODEL=ep-your-endpoint-id
+OPENROUTER_API_KEY=your-openrouter-api-key
 APP_AUTH_TOKEN=replace-with-at-least-24-random-characters
 ```
 
@@ -199,9 +196,9 @@ cp deploy/volcengine/terraform.tfvars.example \
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `ARK_API_KEY` | Required | Ark model API key. |
-| `ARK_MODEL` | Required | Responses-capable endpoint or model ID. |
-| `ARK_BASE_URL` | Beijing v3 endpoint | Ark OpenAI-compatible API URL. |
+| `OPENROUTER_API_KEY` | Required | OpenRouter API key (free tier available, no credit card). |
+| `OPENROUTER_MODEL` | `openrouter/free` | OpenRouter model slug; the default auto-routes to a free, tool-calling-capable model. |
+| `OPENROUTER_BASE_URL` | OpenRouter API endpoint | OpenRouter API base URL. |
 | `APP_AUTH_TOKEN` | Empty on loopback | Shared demo token; use 24+ random characters remotely. |
 | `RUNTIME_PROVIDER` | `local-process` | `container` for disposable local Runtime containers. |
 | `CODEX_SANDBOX_MODE` | `workspace-write` | Codex inner sandbox mode. |
@@ -219,8 +216,8 @@ flowchart LR
     API --> Runtime{"Runtime provider"}
     Runtime -->|Local POC| Container["Disposable Docker / Colima / Podman container"]
     Runtime -->|ECS profile| Codex["Codex CLI in application container"]
-    Container --> Ark["Volcengine Ark Responses API"]
-    Codex --> Ark
+    Container --> OpenRouter["OpenRouter API"]
+    Codex --> OpenRouter
 ```
 
 The first turn uses `codex exec`; later turns resume the stored Codex thread.

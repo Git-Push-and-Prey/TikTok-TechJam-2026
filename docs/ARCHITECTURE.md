@@ -11,8 +11,8 @@ flowchart LR
     Service --> Runner{"AgentRunner"}
     Runner -->|Local POC| Container["Disposable Runtime container"]
     Runner -->|ECS| Process["Codex child process"]
-    Container --> Ark["Volcengine Ark"]
-    Process --> Ark
+    Container --> OpenRouter["OpenRouter"]
+    Process --> OpenRouter
 ```
 
 ## Components
@@ -20,7 +20,7 @@ flowchart LR
 ### Web UI
 
 Lists Agents, manages lifecycle actions, submits prompts, and polls asynchronous
-Runs. It never receives the Ark API key.
+Runs. It never receives the OpenRouter API key.
 
 ### Fastify API
 
