@@ -14,3 +14,10 @@ export class RunCancelledError extends Error {
     this.name = "RunCancelledError";
   }
 }
+
+export class CredentialError extends HttpError {
+  constructor(message = "Invalid Agent credential") {
+    super(401, message);
+    this.name = "CredentialError";
+  }
+}

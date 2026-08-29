@@ -38,6 +38,9 @@ const envSchema = z.object({
     .max(128)
     .regex(/^[A-Za-z0-9._~-]*$/, "APP_AUTH_TOKEN must use URL-safe characters")
     .optional(),
+  AGENT_CREDENTIAL_MASTER_KEY: z.string().trim().optional(),
+  AGENT_CREDENTIAL_TTL_MS: z.coerce.number().int().min(60_000).default(2_592_000_000),
+  AGENT_CREDENTIAL_OVERLAP_MS: z.coerce.number().int().min(1_000).default(300_000),
   ARK_API_KEY: z.string().optional(),
   ARK_MODEL: z.string().optional(),
   ARK_BASE_URL: z
@@ -51,6 +54,14 @@ export type AppConfig = ReturnType<typeof loadConfig>;
 
 export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
   const env = envSchema.parse(environment);
+  let agentCredentialMasterKey: Buffer | null = null;
+  if (env.AGENT_CREDENTIAL_MASTER_KEY) {
+    const decoded = Buffer.from(env.AGENT_CREDENTIAL_MASTER_KEY, "base64");
+    if (decoded.length !== 32 || decoded.toString("base64") !== env.AGENT_CREDENTIAL_MASTER_KEY) {
+      throw new Error("AGENT_CREDENTIAL_MASTER_KEY must be a base64-encoded 32-byte key");
+    }
+    agentCredentialMasterKey = decoded;
+  }
   const authToken = env.APP_AUTH_TOKEN?.trim() ?? "";
   const loopbackHosts = new Set(["127.0.0.1", "::1", "localhost"]);
   if (env.NODE_ENV === "production" && !loopbackHosts.has(env.HOST)) {
@@ -84,6 +95,9 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     containerUser: env.CONTAINER_USER?.trim() || defaultContainerUser,
     runtimeInstanceId: env.RUNTIME_INSTANCE_ID,
     authToken,
+    agentCredentialMasterKey,
+    agentCredentialTtlMs: env.AGENT_CREDENTIAL_TTL_MS,
+    agentCredentialOverlapMs: env.AGENT_CREDENTIAL_OVERLAP_MS,
     arkApiKey: env.ARK_API_KEY?.trim() ?? "",
     arkModel: env.ARK_MODEL?.trim() ?? "",
     arkBaseUrl: env.ARK_BASE_URL.replace(/\/+$/, ""),

@@ -86,6 +86,22 @@ export function parseCodexEventLine(line: string, parsed: ParsedEvents): void {
   }
 }
 
+/**
+ * Codex performs the actual ModelArk request. Translate a provider rate-limit
+ * response into an actionable Run error without discarding its request ID.
+ */
+export function describeCodexFailure(detail: string): string {
+  if (/\b429\b.*\btoo many requests\b/i.test(detail)) {
+    return (
+      "BytePlus ModelArk rate limited this request (HTTP 429). " +
+      "Wait and retry, reduce concurrent requests, or use an endpoint with available quota. " +
+      "Runtime detail: " +
+      detail
+    );
+  }
+  return detail;
+}
+
 export class CodexRunner implements AgentRunner {
   private readonly active = new Map<
     string,
@@ -209,7 +225,9 @@ export class CodexRunner implements AgentRunner {
       }
       if (exitCode !== 0) {
         const detail = parsed.errors.at(-1) ?? stderr.trim() ?? "No error detail";
-        throw new Error("Codex exited with code " + exitCode + ": " + detail);
+        throw new Error(
+          "Codex exited with code " + exitCode + ": " + describeCodexFailure(detail),
+        );
       }
       const output = parsed.messages.at(-1)?.trim();
       if (!output) {
