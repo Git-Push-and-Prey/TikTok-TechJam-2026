@@ -7,9 +7,11 @@ import { z } from "zod";
 import type { AppConfig } from "./config.js";
 import { HttpError } from "./errors.js";
 import type { AgentService } from "./agent-service.js";
+import type { SessionEngine } from "./session-engine.js";
 
 const agentIdParams = z.object({ id: z.string().uuid() });
 const runIdParams = z.object({ id: z.string().uuid() });
+const sessionIdParams = z.object({ id: z.string().uuid() });
 const createAgentBody = z.object({
   name: z.string().trim().min(1).max(80),
   description: z.string().max(500).optional(),
@@ -22,10 +24,25 @@ const updateAgentBody = createAgentBody.partial().refine(
 const messageBody = z.object({
   content: z.string().trim().min(1).max(50_000),
 });
+const createSessionBody = z.object({
+  name: z.string().trim().min(1).max(80),
+  description: z.string().max(500).optional(),
+  memberAgentIds: z.array(z.string().uuid()).min(1).max(20),
+});
+const updateSessionMembersBody = z
+  .object({
+    add: z.array(z.string().uuid()).optional(),
+    remove: z.array(z.string().uuid()).optional(),
+  })
+  .refine(
+    (value) => (value.add?.length ?? 0) + (value.remove?.length ?? 0) > 0,
+    "At least one of add/remove is required",
+  );
 
 export async function createApp(
   config: AppConfig,
   service: AgentService,
+  sessions: SessionEngine,
 ): Promise<FastifyInstance> {
   const app = Fastify({
     logger: {
@@ -126,6 +143,48 @@ export async function createApp(
   app.get("/api/runs/:id", async (request) => {
     const { id } = runIdParams.parse(request.params);
     return { run: service.getRun(id) };
+  });
+
+  app.get("/api/sessions", async () => ({ sessions: sessions.listSessions() }));
+
+  app.post("/api/sessions", async (request, reply) => {
+    const body = createSessionBody.parse(request.body);
+    const session = await sessions.createSession(body);
+    return reply.code(201).send({ session });
+  });
+
+  app.get("/api/sessions/:id", async (request) => {
+    const { id } = sessionIdParams.parse(request.params);
+    return { session: sessions.getSession(id) };
+  });
+
+  app.patch("/api/sessions/:id/members", async (request) => {
+    const { id } = sessionIdParams.parse(request.params);
+    const body = updateSessionMembersBody.parse(request.body);
+    return { session: await sessions.updateMembers(id, body.add, body.remove) };
+  });
+
+  app.delete("/api/sessions/:id", async (request, reply) => {
+    const { id } = sessionIdParams.parse(request.params);
+    await sessions.deleteSession(id);
+    return reply.code(204).send();
+  });
+
+  app.post("/api/sessions/:id/stop", async (request) => {
+    const { id } = sessionIdParams.parse(request.params);
+    return { session: await sessions.stopSession(id) };
+  });
+
+  app.get("/api/sessions/:id/messages", async (request) => {
+    const { id } = sessionIdParams.parse(request.params);
+    return { messages: sessions.transcriptFor(id) };
+  });
+
+  app.post("/api/sessions/:id/messages", async (request, reply) => {
+    const { id } = sessionIdParams.parse(request.params);
+    const body = messageBody.parse(request.body);
+    const result = await sessions.handleUserMessage(id, body.content);
+    return reply.code(202).send(result);
   });
 
   if (config.nodeEnv === "production") {

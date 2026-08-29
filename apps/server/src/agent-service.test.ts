@@ -133,3 +133,44 @@ describe("Agent lifecycle", () => {
     await expect.poll(() => service.getRun(run.id).status).toBe("completed");
   });
 });
+
+describe("Session-turn support", () => {
+  it("keeps a session-scoped thread separate from the Agent's own codexThreadId", async () => {
+    const service = await makeService();
+    const agent = await service.createAgent({ name: "Shared" });
+    let observedThreadId: string | null | undefined;
+    await service.sendMessage(agent.id, "session turn", {
+      workspaceOverride: agent.workspacePath,
+      sessionId: "11111111-1111-1111-1111-111111111111",
+      session: {
+        threadId: null,
+        onThreadId: (threadId) => {
+          observedThreadId = threadId;
+        },
+      },
+    });
+    await expect.poll(() => service.getAgent(agent.id).status).toBe("ready");
+    expect(observedThreadId).toBe("fake-thread");
+    expect(service.getAgent(agent.id).codexThreadId).toBeNull();
+    expect(service.getMessages(agent.id)).toHaveLength(0);
+  });
+
+  it("emits run:settled exactly once with the final run status", async () => {
+    const service = await makeService();
+    const agent = await service.createAgent({ name: "Watched" });
+    const settled: unknown[] = [];
+    service.on("run:settled", (event) => settled.push(event));
+    const { run } = await service.sendMessage(agent.id, "hello");
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+    await expect.poll(() => settled.length).toBe(1);
+    expect(settled[0]).toMatchObject({ agentId: agent.id, run: { id: run.id, status: "completed" } });
+  });
+
+  it("hides orchestrator-kind Agents from listAgents()", async () => {
+    const service = await makeService();
+    await service.createAgent({ name: "Visible" });
+    await service.createAgent({ name: "Hidden Orchestrator", kind: "orchestrator" });
+    const names = service.listAgents().map((agent) => agent.name);
+    expect(names).toEqual(["Visible"]);
+  });
+});

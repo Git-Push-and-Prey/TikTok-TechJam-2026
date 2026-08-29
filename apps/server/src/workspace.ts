@@ -9,9 +9,40 @@ export class WorkspaceManager {
     return path.join(this.root, agentId);
   }
 
+  sessionWorkspacePath(sessionId: string): string {
+    return path.join(this.root, ".sessions", sessionId);
+  }
+
   async initialize(): Promise<void> {
     await mkdir(this.root, { recursive: true });
     await mkdir(path.join(this.root, ".deleted"), { recursive: true });
+    await mkdir(path.join(this.root, ".sessions"), { recursive: true });
+  }
+
+  async createSessionWorkspace(sessionId: string, name: string, description: string): Promise<string> {
+    const dir = this.sessionWorkspacePath(sessionId);
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      path.join(dir, "SESSION.md"),
+      [
+        "# " + name,
+        "",
+        description ? description : "(no description)",
+        "",
+        "This is a shared workspace for a multi-agent Session.",
+        "Every member Agent's turns in this Session read and write files here.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    return dir;
+  }
+
+  async archiveSessionWorkspace(sessionWorkspacePath: string, sessionId: string): Promise<string> {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const destination = path.join(this.root, ".deleted", "session-" + sessionId + "-" + timestamp);
+    await rename(sessionWorkspacePath, destination);
+    return destination;
   }
 
   async create(agent: Agent): Promise<void> {

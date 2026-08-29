@@ -16,6 +16,8 @@ flowchart LR
     Service --> SessionLogger["SessionLogger"]
     SessionLogger --> Logs["logs/AgentID.log"]
     Logs --> LogViewer["Log Viewer\n(apps/log-viewer, separate service)"]
+    SessionEngine["SessionEngine\n(multi-agent Sessions)"] --> Service
+    UI --> SessionEngine
 ```
 
 ## Components
@@ -77,6 +79,18 @@ that reads the same `LOGS_DIR` and serves a small static UI for listing
 sessions and filtering one by keyword — it has no dependency on the main
 server or its API. See [SESSION_LOGGING.md](SESSION_LOGGING.md) for the full
 data flow, file format, and redaction rules.
+
+### Multi-agent Sessions
+
+A `Session` holds a roster of existing Agents and is fronted by a hidden
+**orchestrator** Agent (`SessionEngine`) that decomposes an incoming request
+into subtasks and delegates each one to the right roster member, then
+synthesizes their results into one answer. Only Agents added to a Session's
+roster can ever be routed to — enforced in `SessionEngine`, not the UI — and
+a Session's activity (separate Codex thread, separate message history) never
+appears in an Agent's own Playground conversation. See
+[MULTI_AGENT_SESSIONS.md](MULTI_AGENT_SESSIONS.md) for the full turn
+lifecycle, the sender/recipient message model, and known limitations.
 
 ## Deployment profiles
 

@@ -199,6 +199,28 @@ button {
   font-weight: 400;
 }
 
+.view-toggle {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.view-toggle .button {
+  flex: 1;
+  justify-content: center;
+}
+
+.member-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+}
+
+.member-checkbox input {
+  width: auto;
+}
+
 .sidebar-label {
   display: flex;
   justify-content: space-between;
@@ -620,6 +642,20 @@ textarea:focus {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.details-toggle {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 0;
 }
 
 .pulse {

@@ -1,5 +1,7 @@
 export type AgentStatus = "ready" | "busy" | "stopped" | "error";
+export type AgentKind = "user" | "orchestrator";
 export type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+export type SessionStage = "idle" | "decomposing" | "delegating" | "synthesizing" | "failed";
 
 export interface Agent {
   id: string;
@@ -7,6 +9,7 @@ export interface Agent {
   description: string;
   instructions: string;
   status: AgentStatus;
+  kind: AgentKind;
   workspacePath: string;
   codexThreadId: string | null;
   lastError: string | null;
@@ -14,13 +17,34 @@ export interface Agent {
   updatedAt: string;
 }
 
+/** Must match the server's USER_PARTY/SYSTEM_PARTY sentinels (apps/server/src/types.ts). */
+export const USER_PARTY = "user";
+export const SYSTEM_PARTY = "system";
+
 export interface Message {
   id: string;
   agentId: string;
   runId: string;
   role: "user" | "assistant";
   content: string;
+  sessionId: string | null;
+  senderId?: string;
+  recipientId?: string;
   createdAt: string;
+}
+
+export interface Session {
+  id: string;
+  name: string;
+  description: string;
+  memberAgentIds: string[];
+  orchestratorAgentId: string;
+  workspacePath: string;
+  stage: SessionStage;
+  pendingSubtasks: { runId: string; agentId: string; task: string }[];
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface AgentRun {

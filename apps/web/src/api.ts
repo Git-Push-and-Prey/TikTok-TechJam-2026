@@ -1,4 +1,4 @@
-import type { Agent, AgentRun, Message, SystemInfo } from "./types";
+import type { Agent, AgentRun, Message, Session, SystemInfo } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -78,4 +78,27 @@ export const api = {
       },
     ),
   run: (id: string) => request<{ run: AgentRun }>("/api/runs/" + id),
+  listSessions: () => request<{ sessions: Session[] }>("/api/sessions"),
+  createSession: (body: { name: string; description: string; memberAgentIds: string[] }) =>
+    request<{ session: Session }>("/api/sessions", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  getSession: (id: string) => request<{ session: Session }>("/api/sessions/" + id),
+  updateSessionMembers: (id: string, body: { add?: string[]; remove?: string[] }) =>
+    request<{ session: Session }>("/api/sessions/" + id + "/members", {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deleteSession: (id: string) =>
+    request<void>("/api/sessions/" + id, { method: "DELETE" }),
+  stopSession: (id: string) =>
+    request<{ session: Session }>("/api/sessions/" + id + "/stop", { method: "POST" }),
+  sessionMessages: (id: string) =>
+    request<{ messages: Message[] }>("/api/sessions/" + id + "/messages"),
+  sendSessionMessage: (id: string, content: string) =>
+    request<{ message: Message }>("/api/sessions/" + id + "/messages", {
+      method: "POST",
+      body: JSON.stringify({ content }),
+    }),
 };

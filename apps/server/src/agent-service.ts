@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import type { AppConfig } from "./config.js";
 import { isOpenRouterConfigured } from "./config.js";
 import { HttpError, RunCancelledError } from "./errors.js";
@@ -12,11 +13,29 @@ import type {
   Message,
   UpdateAgentInput,
 } from "./types.js";
+import { USER_PARTY } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
 
 const now = () => new Date().toISOString();
 
-export class AgentService {
+export interface SendMessageOptions {
+  /** Run against this directory instead of the Agent's own workspacePath (used by Session turns). */
+  workspaceOverride?: string;
+  /** Tags the created Message/AgentRun so it doesn't show up in the Agent's own Playground history. */
+  sessionId?: string;
+  /**
+   * When present, read/write the Codex thread id from here instead of the
+   * Agent's own `codexThreadId` — keeps a Session's conversation with an
+   * Agent separate from that Agent's solo Playground conversation.
+   */
+  session?: { threadId: string | null; onThreadId: (threadId: string | null) => void };
+  /** Who is sending this turn's prompt — USER_PARTY, SYSTEM_PARTY, or an Agent id. Defaults to USER_PARTY. */
+  sender?: string;
+  /** Who the reply is addressed to. Defaults to `sender` (a plain reply-to-sender exchange). */
+  recipient?: string;
+}
+
+export class AgentService extends EventEmitter {
   private readonly activeExecutions = new Map<string, Promise<void>>();
   private readonly cancellationRequests = new Set<string>();
 
@@ -26,7 +45,9 @@ export class AgentService {
     private readonly workspaces: WorkspaceManager,
     private readonly runner: AgentRunner,
     private readonly sessionLogger: SessionLogger,
-  ) {}
+  ) {
+    super();
+  }
 
   async initialize(): Promise<void> {
     await this.store.initialize();
@@ -52,7 +73,8 @@ export class AgentService {
   listAgents(): Agent[] {
     return this.store
       .snapshot()
-      .agents.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+      .agents.filter((agent) => agent.kind !== "orchestrator")
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
   getAgent(id: string): Agent {
@@ -72,6 +94,7 @@ export class AgentService {
       description: input.description?.trim() ?? "",
       instructions: input.instructions?.trim() ?? "",
       status: "ready",
+      kind: input.kind ?? "user",
       workspacePath: this.workspaces.workspacePath(id),
       codexThreadId: null,
       lastError: null,
@@ -133,7 +156,7 @@ export class AgentService {
     this.getAgent(agentId);
     return this.store
       .snapshot()
-      .messages.filter((message) => message.agentId === agentId)
+      .messages.filter((message) => message.agentId === agentId && message.sessionId === null)
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
   }
 
@@ -149,13 +172,14 @@ export class AgentService {
     this.getAgent(agentId);
     return this.store
       .snapshot()
-      .runs.filter((run) => run.agentId === agentId)
+      .runs.filter((run) => run.agentId === agentId && run.sessionId === null)
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   }
 
   async sendMessage(
     agentId: string,
     prompt: string,
+    options?: SendMessageOptions,
   ): Promise<{ run: AgentRun; message: Message }> {
     if (!isOpenRouterConfigured(this.config)) {
       throw new HttpError(
@@ -165,6 +189,7 @@ export class AgentService {
     }
     const timestamp = now();
     const runId = randomUUID();
+    const sessionId = options?.sessionId ?? null;
     const run: AgentRun = {
       id: runId,
       agentId,
@@ -173,16 +198,21 @@ export class AgentService {
       output: null,
       error: null,
       usage: null,
+      sessionId,
       startedAt: null,
       completedAt: null,
       createdAt: timestamp,
     };
+    const senderId = options?.sender ?? USER_PARTY;
     const message: Message = {
       id: randomUUID(),
       agentId,
       runId,
       role: "user",
       content: prompt,
+      sessionId,
+      senderId,
+      recipientId: agentId,
       createdAt: timestamp,
     };
     const agentAtStart = await this.store.mutate((database) => {
@@ -208,7 +238,7 @@ export class AgentService {
       { agentId, agentName: agentAtStart.name, runId },
       prompt,
     );
-    const execution = this.executeRun(agentAtStart, run);
+    const execution = this.executeRun(agentAtStart, run, options);
     this.activeExecutions.set(agentId, execution);
     void execution
       .finally(() => {
@@ -239,7 +269,11 @@ export class AgentService {
     };
   }
 
-  private async executeRun(agentAtStart: Agent, run: AgentRun): Promise<void> {
+  private async executeRun(
+    agentAtStart: Agent,
+    run: AgentRun,
+    options?: SendMessageOptions,
+  ): Promise<void> {
     const logContext: SessionLogContext = {
       agentId: agentAtStart.id,
       agentName: agentAtStart.name,
@@ -258,9 +292,9 @@ export class AgentService {
       }
       const result = await this.runner.run({
         agentId: agentAtStart.id,
-        workspacePath: agentAtStart.workspacePath,
+        workspacePath: options?.workspaceOverride ?? agentAtStart.workspacePath,
         prompt: run.prompt,
-        threadId: agentAtStart.codexThreadId,
+        threadId: options?.session ? options.session.threadId : agentAtStart.codexThreadId,
         onEvent: (event) => {
           if (event.kind === "tool_call") {
             void this.sessionLogger.logToolCall(logContext, event);
@@ -271,10 +305,10 @@ export class AgentService {
       });
       void this.sessionLogger.logAgentResponse(logContext, result.output, result.usage);
       const completedAt = now();
-      await this.store.mutate((database) => {
+      const finalRun = await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === run.id);
         const agent = database.agents.find((item) => item.id === agentAtStart.id);
-        if (!storedRun || !agent) return;
+        if (!storedRun || !agent) return null;
         storedRun.status = "completed";
         storedRun.output = result.output;
         storedRun.usage = result.usage;
@@ -285,13 +319,22 @@ export class AgentService {
           runId: run.id,
           role: "assistant",
           content: result.output,
+          sessionId: run.sessionId,
+          senderId: agent.id,
+          recipientId: options?.recipient ?? options?.sender ?? USER_PARTY,
           createdAt: completedAt,
         });
         agent.status = "ready";
-        agent.codexThreadId = result.threadId;
+        if (options?.session) {
+          options.session.onThreadId(result.threadId);
+        } else {
+          agent.codexThreadId = result.threadId;
+        }
         agent.lastError = null;
         agent.updatedAt = completedAt;
+        return structuredClone(storedRun);
       });
+      if (finalRun) this.emit("run:settled", { agentId: agentAtStart.id, run: finalRun });
     } catch (error) {
       const completedAt = now();
       const cancelled = error instanceof RunCancelledError;
@@ -300,7 +343,7 @@ export class AgentService {
         logContext,
         cancelled ? "Run cancelled by user" : message,
       );
-      await this.store.mutate((database) => {
+      const finalRun = await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === run.id);
         const agent = database.agents.find((item) => item.id === agentAtStart.id);
         if (storedRun) {
@@ -315,7 +358,9 @@ export class AgentService {
           agent.lastError = cancelled ? null : message;
           agent.updatedAt = completedAt;
         }
+        return storedRun ? structuredClone(storedRun) : null;
       });
+      if (finalRun) this.emit("run:settled", { agentId: agentAtStart.id, run: finalRun });
     }
   }
 

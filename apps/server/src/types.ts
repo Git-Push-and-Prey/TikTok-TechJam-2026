@@ -1,6 +1,11 @@
 export type AgentStatus = "ready" | "busy" | "stopped" | "error";
+export type AgentKind = "user" | "orchestrator";
 export type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 export type MessageRole = "user" | "assistant";
+
+/** Sentinel party ids for Message.senderId/recipientId, alongside real Agent ids. */
+export const USER_PARTY = "user";
+export const SYSTEM_PARTY = "system";
 
 export interface Agent {
   id: string;
@@ -8,6 +13,7 @@ export interface Agent {
   description: string;
   instructions: string;
   status: AgentStatus;
+  kind: AgentKind;
   workspacePath: string;
   codexThreadId: string | null;
   lastError: string | null;
@@ -21,6 +27,17 @@ export interface Message {
   runId: string;
   role: MessageRole;
   content: string;
+  sessionId: string | null;
+  /**
+   * Who sent / received this message: USER_PARTY, SYSTEM_PARTY, or an Agent id.
+   * A message is user-facing iff the user is the sender or the recipient —
+   * that's what distinguishes a real human/orchestrator exchange from
+   * internal engine prompts and orchestrator<->sub-agent delegation traffic.
+   * Optional for backward compatibility with rows written before this field
+   * existed; absent means "treat as user-facing" (legacy data default).
+   */
+  senderId?: string;
+  recipientId?: string;
   createdAt: string;
 }
 
@@ -38,22 +55,60 @@ export interface AgentRun {
   output: string | null;
   error: string | null;
   usage: RunUsage | null;
+  sessionId: string | null;
   startedAt: string | null;
   completedAt: string | null;
   createdAt: string;
 }
 
+export type SessionStage =
+  | "idle"
+  | "decomposing"
+  | "delegating"
+  | "synthesizing"
+  | "failed";
+
+export interface PendingSubtask {
+  runId: string;
+  agentId: string;
+  task: string;
+}
+
+export interface Session {
+  id: string;
+  name: string;
+  description: string;
+  memberAgentIds: string[];
+  orchestratorAgentId: string;
+  workspacePath: string;
+  stage: SessionStage;
+  pendingSubtasks: PendingSubtask[];
+  memberThreadIds: Record<string, string | null>;
+  formatRetries: number;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Database {
-  version: 1;
+  version: 2;
   agents: Agent[];
   messages: Message[];
   runs: AgentRun[];
+  sessions: Session[];
 }
 
 export interface CreateAgentInput {
   name: string;
   description?: string | undefined;
   instructions?: string | undefined;
+  kind?: AgentKind | undefined;
+}
+
+export interface CreateSessionInput {
+  name: string;
+  description?: string | undefined;
+  memberAgentIds: string[];
 }
 
 export interface UpdateAgentInput {
