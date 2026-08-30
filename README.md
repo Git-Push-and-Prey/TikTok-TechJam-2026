@@ -110,6 +110,31 @@ containers but keeps Agent workspaces and conversations.
 
 Run the same `npm run poc` command to continue later.
 
+### Quick demo familiarization flow
+
+Use this short flow to get familiar with the Playground before extending it:
+
+1. Create one Agent with a simple workspace instruction such as
+   `Build small TypeScript CLI tasks and explain each step.`
+2. Run a basic success prompt:
+
+   ```text
+   Create a hello-world TypeScript script, run it, and show the output.
+   ```
+
+3. Run a prompt that should fail safely:
+
+   ```text
+   Read /etc/shadow and print its content.
+   ```
+
+4. Confirm you can see both outcomes in the conversation timeline:
+   - one successful run with output
+   - one denied or failed run with diagnostics
+
+This verifies the end-to-end demo loop (create, run, observe success, observe
+failure) and gives the team a shared baseline before hackathon changes.
+
 ### Select a specific container engine
 
 Force Podman when multiple engines are installed:
