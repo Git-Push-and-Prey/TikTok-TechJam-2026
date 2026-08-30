@@ -203,12 +203,34 @@ cp deploy/volcengine/terraform.tfvars.example \
 | `ARK_MODEL` | Required | Responses-capable endpoint or model ID. |
 | `ARK_BASE_URL` | Beijing v3 endpoint | Ark OpenAI-compatible API URL. |
 | `APP_AUTH_TOKEN` | Empty on loopback | Shared demo token; use 24+ random characters remotely. |
+| `AGENT_CREDENTIAL_MASTER_KEY` | Empty (credential APIs disabled) | Base64-encoded 32-byte AES-256-GCM master key for AgentKey credentials. |
+| `AGENT_CREDENTIAL_TTL_MS` | `2592000000` | Agent credential lifetime in milliseconds. |
+| `AGENT_CREDENTIAL_OVERLAP_MS` | `300000` | Old-key grace period during credential rotation. |
 | `RUNTIME_PROVIDER` | `local-process` | `container` for disposable local Runtime containers. |
 | `CODEX_SANDBOX_MODE` | `workspace-write` | Codex inner sandbox mode. |
 | `CODEX_TIMEOUT_MS` | `600000` | Maximum duration of one turn. |
 | `LOCAL_POC_DATA_ROOT` | Platform-specific | Local metadata, workspace, and session directory. |
 
 See [.env.example](.env.example) for all Runtime and resource-limit options.
+
+## Agent credentials
+
+Set `AGENT_CREDENTIAL_MASTER_KEY` to enable the server-side AgentKey middleware.
+One Agent owns one workspace in the current Starter Kit, therefore `agentId` is
+used as the stable `workspaceId` for this credential POC. Create, rotate, list,
+revoke, and audit credentials through `/api/agents/:id/credentials`; creation
+and rotation return `agent_key_<keyId>.<secret>` exactly once. The JSON store
+contains only AES-256-GCM encrypted secret material and safe metadata.
+
+An issued key can authenticate the Agent's Playground message action with:
+
+```text
+Authorization: AgentKey agent_key_<keyId>.<secret>
+```
+
+The server validates the key, Agent ID, status, expiry, and rotation overlap
+before calling `AgentService.sendMessage()`. Existing browser/shared-token
+operation is unchanged.
 
 ## How it works
 

@@ -7,6 +7,8 @@ const emptyDatabase = (): Database => ({
   agents: [],
   messages: [],
   runs: [],
+  credentials: [],
+  credentialAuditEvents: [],
 });
 
 export class JsonStore {
@@ -23,6 +25,9 @@ export class JsonStore {
       if (parsed.version !== 1 || !Array.isArray(parsed.agents)) {
         throw new Error("Unsupported database format");
       }
+      // Version 1 predates credentials. Keep existing Starter Kit databases readable.
+      parsed.credentials ??= [];
+      parsed.credentialAuditEvents ??= [];
       this.data = parsed;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {

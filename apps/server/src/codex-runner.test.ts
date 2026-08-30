@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildCodexArgs, parseCodexEventLine } from "./codex-runner.js";
+import {
+  buildCodexArgs,
+  describeCodexFailure,
+  parseCodexEventLine,
+} from "./codex-runner.js";
 
 describe("Codex runner protocol", () => {
   it("builds a new-session invocation", () => {
@@ -69,5 +73,11 @@ describe("Codex runner protocol", () => {
     expect(parsed.threadId).toBe("thread-123");
     expect(parsed.messages).toEqual(["Done."]);
     expect(parsed.usage).toEqual({ inputTokens: 10, outputTokens: 4 });
+  });
+
+  it("explains ModelArk rate limits without removing provider detail", () => {
+    const detail = "exceeded retry limit, last status: 429 Too Many Requests, request id: abc";
+    expect(describeCodexFailure(detail)).toContain("BytePlus ModelArk rate limited");
+    expect(describeCodexFailure(detail)).toContain("request id: abc");
   });
 });

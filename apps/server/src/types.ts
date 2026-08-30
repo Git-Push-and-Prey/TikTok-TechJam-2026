@@ -1,6 +1,15 @@
 export type AgentStatus = "ready" | "busy" | "stopped" | "error";
 export type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 export type MessageRole = "user" | "assistant";
+export type CredentialStatus = "active" | "rotating" | "expired" | "revoked";
+export type CredentialAuditEventType =
+  | "key_created"
+  | "key_rotated"
+  | "key_revoked"
+  | "key_expired"
+  | "authentication_succeeded"
+  | "authentication_failed"
+  | "authentication_failed_revoked_key";
 
 export interface Agent {
   id: string;
@@ -43,11 +52,53 @@ export interface AgentRun {
   createdAt: string;
 }
 
+export interface AgentCredential {
+  keyId: string;
+  agentId: string;
+  /** One Agent owns one workspace in this Starter Kit, so this is the agent ID. */
+  workspaceId: string;
+  encryptedSecret: string;
+  iv: string;
+  authTag: string;
+  createdAt: string;
+  expiresAt: string;
+  status: CredentialStatus;
+  lastUsedAt: string | null;
+  overlapUntil?: string | null;
+  revokedAt?: string | null;
+  revocationReason?: string | null;
+}
+
+export interface CredentialAuditEvent {
+  id: string;
+  type: CredentialAuditEventType;
+  agentId: string;
+  workspaceId: string;
+  keyId: string | null;
+  createdAt: string;
+  reason?: string | null;
+}
+
+export interface CredentialMetadata {
+  keyId: string;
+  agentId: string;
+  workspaceId: string;
+  createdAt: string;
+  expiresAt: string;
+  status: CredentialStatus;
+  lastUsedAt: string | null;
+  overlapUntil: string | null;
+  revokedAt: string | null;
+  revocationReason: string | null;
+}
+
 export interface Database {
   version: 1;
   agents: Agent[];
   messages: Message[];
   runs: AgentRun[];
+  credentials: AgentCredential[];
+  credentialAuditEvents: CredentialAuditEvent[];
 }
 
 export interface CreateAgentInput {
