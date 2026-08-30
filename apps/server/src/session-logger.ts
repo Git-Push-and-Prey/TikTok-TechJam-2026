@@ -55,6 +55,8 @@ export interface SessionLogContext {
   agentId: string;
   agentName: string;
   runId: string;
+  /** The User that owns the Agent this Run belongs to. Null for pre-login Agents. */
+  ownerId: string | null;
 }
 
 /** One append-only JSONL file per Agent conversation (session = agentId), so the whole exchange history lives in one place. */
@@ -76,6 +78,7 @@ export class SessionLogger {
       sessionId: context.agentId,
       agentName: context.agentName,
       runId: context.runId,
+      ownerId: context.ownerId,
       ...boundEntry(entry),
     };
     const line = redact(JSON.stringify(record));

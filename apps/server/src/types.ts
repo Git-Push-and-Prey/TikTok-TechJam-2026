@@ -17,8 +17,26 @@ export interface Agent {
   workspacePath: string;
   codexThreadId: string | null;
   lastError: string | null;
+  /** The User that owns this Agent. Null for rows migrated before accounts existed. */
+  ownerId: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface User {
+  id: string;
+  username: string;
+  /** Self-describing scrypt hash string: "scrypt:<saltHex>:<hashHex>". */
+  passwordHash: string;
+  createdAt: string;
+}
+
+export interface AuthToken {
+  /** sha256 hex digest of the opaque bearer token — the raw token is never persisted. */
+  tokenHash: string;
+  userId: string;
+  createdAt: string;
+  expiresAt: string;
 }
 
 export interface Message {
@@ -38,6 +56,17 @@ export interface Message {
    */
   senderId?: string;
   recipientId?: string;
+  /**
+   * "comment" = a human-to-human aside in a Session, not addressed to any
+   * Agent (no `recipientId`) and never gated by the Session's `stage`.
+   * Absent/"task" for every other message (a normal turn to the
+   * orchestrator, or a Playground message).
+   */
+  kind?: "task" | "comment";
+  /** The real User who sent this — set only for human turns in a Session. */
+  senderUserId?: string;
+  /** Denormalized at write time, like SessionLogger's `agentName`, so no lookup is needed to render it. */
+  senderUsername?: string;
   createdAt: string;
 }
 
@@ -86,16 +115,22 @@ export interface Session {
   memberThreadIds: Record<string, string | null>;
   formatRetries: number;
   lastError: string | null;
+  /** The User that created this Session. Null for rows migrated before accounts existed. */
+  ownerId: string | null;
+  /** Other Users with full read/participate access. Absent means none — read as `?? []`. */
+  collaboratorIds?: string[];
   createdAt: string;
   updatedAt: string;
 }
 
 export interface Database {
-  version: 2;
+  version: 3;
   agents: Agent[];
   messages: Message[];
   runs: AgentRun[];
   sessions: Session[];
+  users: User[];
+  authTokens: AuthToken[];
 }
 
 export interface CreateAgentInput {

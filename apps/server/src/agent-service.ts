@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import type { AppConfig } from "./config.js";
 import { isOpenRouterConfigured } from "./config.js";
-import { HttpError, RunCancelledError } from "./errors.js";
+import { assertOwned, HttpError, RunCancelledError } from "./errors.js";
 import { SessionLogger, type SessionLogContext } from "./session-logger.js";
 import { JsonStore } from "./store.js";
 import type {
@@ -70,22 +70,23 @@ export class AgentService extends EventEmitter {
     });
   }
 
-  listAgents(): Agent[] {
+  listAgents(ownerId: string): Agent[] {
     return this.store
       .snapshot()
-      .agents.filter((agent) => agent.kind !== "orchestrator")
+      .agents.filter((agent) => agent.kind !== "orchestrator" && agent.ownerId === ownerId)
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
-  getAgent(id: string): Agent {
+  getAgent(id: string, ownerId?: string | null): Agent {
     const agent = this.store.snapshot().agents.find((item) => item.id === id);
     if (!agent) {
       throw new HttpError(404, "Agent not found");
     }
+    assertOwned(agent.ownerId, ownerId, "Agent not found");
     return agent;
   }
 
-  async createAgent(input: CreateAgentInput): Promise<Agent> {
+  async createAgent(input: CreateAgentInput, ownerId: string | null): Promise<Agent> {
     const timestamp = now();
     const id = randomUUID();
     const agent: Agent = {
@@ -98,6 +99,7 @@ export class AgentService extends EventEmitter {
       workspacePath: this.workspaces.workspacePath(id),
       codexThreadId: null,
       lastError: null,
+      ownerId,
       createdAt: timestamp,
       updatedAt: timestamp,
     };
@@ -106,8 +108,32 @@ export class AgentService extends EventEmitter {
     return agent;
   }
 
-  async updateAgent(id: string, input: UpdateAgentInput): Promise<Agent> {
-    const current = this.getAgent(id);
+  /**
+   * Shares an Agent by cloning its definition (name/description/instructions)
+   * into a brand-new Agent owned by `targetUserId` — a fresh workspace and
+   * thread, no shared conversation history with the source.
+   */
+  async shareAgent(id: string, ownerId: string, targetUserId: string): Promise<Agent> {
+    const source = this.getAgent(id, ownerId);
+    if (source.kind === "orchestrator") {
+      throw new HttpError(400, "An orchestrator Agent cannot be shared");
+    }
+    return this.createAgent(
+      {
+        name: source.name,
+        description: source.description,
+        instructions: source.instructions,
+      },
+      targetUserId,
+    );
+  }
+
+  async updateAgent(
+    id: string,
+    input: UpdateAgentInput,
+    ownerId?: string | null,
+  ): Promise<Agent> {
+    const current = this.getAgent(id, ownerId);
     if (current.status === "busy") {
       throw new HttpError(409, "Stop the active run before editing this Agent");
     }
@@ -130,8 +156,11 @@ export class AgentService extends EventEmitter {
     return updated;
   }
 
-  async deleteAgent(id: string): Promise<{ archivedWorkspace: string }> {
-    const agent = this.getAgent(id);
+  async deleteAgent(
+    id: string,
+    ownerId?: string | null,
+  ): Promise<{ archivedWorkspace: string }> {
+    const agent = this.getAgent(id, ownerId);
     await this.cancelExecution(id);
     const archivedWorkspace = await this.workspaces.archive(agent);
     await this.store.mutate((database) => {
@@ -142,34 +171,37 @@ export class AgentService extends EventEmitter {
     return { archivedWorkspace };
   }
 
-  async startAgent(id: string): Promise<Agent> {
-    return this.setStatus(id, "ready");
+  async startAgent(id: string, ownerId?: string | null): Promise<Agent> {
+    return this.setStatus(id, "ready", ownerId);
   }
 
-  async stopAgent(id: string): Promise<Agent> {
-    this.getAgent(id);
+  async stopAgent(id: string, ownerId?: string | null): Promise<Agent> {
+    this.getAgent(id, ownerId);
     await this.cancelExecution(id);
-    return this.setStatus(id, "stopped");
+    return this.setStatus(id, "stopped", ownerId);
   }
 
-  getMessages(agentId: string): Message[] {
-    this.getAgent(agentId);
+  getMessages(agentId: string, ownerId?: string | null): Message[] {
+    this.getAgent(agentId, ownerId);
     return this.store
       .snapshot()
       .messages.filter((message) => message.agentId === agentId && message.sessionId === null)
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
   }
 
-  getRun(runId: string): AgentRun {
-    const run = this.store.snapshot().runs.find((item) => item.id === runId);
+  getRun(runId: string, ownerId?: string | null): AgentRun {
+    const database = this.store.snapshot();
+    const run = database.runs.find((item) => item.id === runId);
     if (!run) {
       throw new HttpError(404, "Run not found");
     }
+    const agent = database.agents.find((item) => item.id === run.agentId);
+    assertOwned(agent?.ownerId ?? null, ownerId, "Run not found");
     return run;
   }
 
-  getRuns(agentId: string): AgentRun[] {
-    this.getAgent(agentId);
+  getRuns(agentId: string, ownerId?: string | null): AgentRun[] {
+    this.getAgent(agentId, ownerId);
     return this.store
       .snapshot()
       .runs.filter((run) => run.agentId === agentId && run.sessionId === null)
@@ -179,8 +211,10 @@ export class AgentService extends EventEmitter {
   async sendMessage(
     agentId: string,
     prompt: string,
+    ownerId?: string | null,
     options?: SendMessageOptions,
   ): Promise<{ run: AgentRun; message: Message }> {
+    this.getAgent(agentId, ownerId);
     if (!isOpenRouterConfigured(this.config)) {
       throw new HttpError(
         503,
@@ -235,7 +269,7 @@ export class AgentService extends EventEmitter {
       return snapshot;
     });
     void this.sessionLogger.logUserMessage(
-      { agentId, agentName: agentAtStart.name, runId },
+      { agentId, agentName: agentAtStart.name, runId, ownerId: agentAtStart.ownerId },
       prompt,
     );
     const execution = this.executeRun(agentAtStart, run, options);
@@ -278,6 +312,7 @@ export class AgentService extends EventEmitter {
       agentId: agentAtStart.id,
       agentName: agentAtStart.name,
       runId: run.id,
+      ownerId: agentAtStart.ownerId,
     };
     await this.store.mutate((database) => {
       const storedRun = database.runs.find((item) => item.id === run.id);
@@ -364,12 +399,17 @@ export class AgentService extends EventEmitter {
     }
   }
 
-  private async setStatus(id: string, status: Agent["status"]): Promise<Agent> {
+  private async setStatus(
+    id: string,
+    status: Agent["status"],
+    ownerId?: string | null,
+  ): Promise<Agent> {
     return this.store.mutate((database) => {
       const agent = database.agents.find((item) => item.id === id);
       if (!agent) {
         throw new HttpError(404, "Agent not found");
       }
+      assertOwned(agent.ownerId, ownerId, "Agent not found");
       if (status === "ready" && agent.status === "busy") {
         throw new HttpError(409, "Stop the active run before starting this Agent");
       }

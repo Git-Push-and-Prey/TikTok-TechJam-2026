@@ -13,8 +13,14 @@ export interface Agent {
   workspacePath: string;
   codexThreadId: string | null;
   lastError: string | null;
+  ownerId: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface User {
+  id: string;
+  username: string;
 }
 
 /** Must match the server's USER_PARTY/SYSTEM_PARTY sentinels (apps/server/src/types.ts). */
@@ -30,6 +36,9 @@ export interface Message {
   sessionId: string | null;
   senderId?: string;
   recipientId?: string;
+  kind?: "task" | "comment";
+  senderUserId?: string;
+  senderUsername?: string;
   createdAt: string;
 }
 
@@ -43,6 +52,16 @@ export interface Session {
   stage: SessionStage;
   pendingSubtasks: { runId: string; agentId: string; task: string }[];
   lastError: string | null;
+  ownerId: string | null;
+  collaborators: { id: string; username: string }[];
+  members: {
+    id: string;
+    name: string;
+    status: AgentStatus;
+    ownerId: string | null;
+    ownerUsername: string | null;
+  }[];
+  isOwner: boolean;
   createdAt: string;
   updatedAt: string;
 }

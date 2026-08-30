@@ -34,7 +34,6 @@ locals {
     "PORT=3000",
     "PUBLIC_PORT=80",
     "LOG_LEVEL=info",
-    "APP_AUTH_TOKEN=${var.app_auth_token}",
     "OPENROUTER_API_KEY=${var.openrouter_api_key}",
     "OPENROUTER_MODEL=${var.openrouter_model}",
     "OPENROUTER_BASE_URL=${var.openrouter_base_url}",

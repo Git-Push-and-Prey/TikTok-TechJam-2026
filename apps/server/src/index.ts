@@ -1,5 +1,6 @@
 import path from "node:path";
 import { AgentService } from "./agent-service.js";
+import { AuthService } from "./auth.js";
 import { createApp } from "./app.js";
 import { loadConfig, writeCodexConfig } from "./config.js";
 import { createRunner } from "./runner-factory.js";
@@ -18,8 +19,9 @@ const sessionLogger = new SessionLogger(config.logsDir);
 const service = new AgentService(config, store, workspaces, runner, sessionLogger);
 await service.initialize();
 const sessions = new SessionEngine(store, service, workspaces, config.codexTimeoutMs + 30_000);
+const auth = new AuthService(store);
 
-const app = await createApp(config, service, sessions);
+const app = await createApp(config, service, sessions, auth);
 
 const shutdown = async (signal: string) => {
   app.log.info({ signal }, "Shutting down");

@@ -108,14 +108,71 @@ describe("JsonStore", () => {
     await store.initialize();
 
     const data = store.snapshot();
-    expect(data.version).toBe(2);
+    expect(data.version).toBe(3);
     expect(data.sessions).toEqual([]);
-    expect(data.agents[0]).toMatchObject({ id: "agent-1", kind: "user" });
+    expect(data.users).toEqual([]);
+    expect(data.authTokens).toEqual([]);
+    expect(data.agents[0]).toMatchObject({ id: "agent-1", kind: "user", ownerId: null });
     expect(data.messages[0]).toMatchObject({ id: "message-1", sessionId: null });
     expect(data.runs[0]).toMatchObject({ id: "run-1", sessionId: null });
 
     const onDisk = JSON.parse(await readFile(dbPath, "utf8")) as Database;
-    expect(onDisk.version).toBe(2);
+    expect(onDisk.version).toBe(3);
     expect(onDisk.agents[0]?.kind).toBe("user");
+    expect(onDisk.agents[0]?.ownerId).toBeNull();
+  });
+
+  it("migrates a v2 database on load, stamping null ownerId on existing rows", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "launchpad-store-migrate-v2-test-"));
+    temporaryDirectories.push(root);
+    const dbPath = path.join(root, "db.json");
+    const v2 = {
+      version: 2,
+      agents: [
+        {
+          id: "agent-1",
+          name: "Legacy Agent",
+          description: "",
+          instructions: "",
+          status: "ready",
+          kind: "user",
+          workspacePath: "/workspaces/agent-1",
+          codexThreadId: null,
+          lastError: null,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+      messages: [],
+      runs: [],
+      sessions: [
+        {
+          id: "session-1",
+          name: "Legacy Session",
+          description: "",
+          memberAgentIds: ["agent-1"],
+          orchestratorAgentId: "orchestrator-1",
+          workspacePath: "/workspaces/session-1",
+          stage: "idle",
+          pendingSubtasks: [],
+          memberThreadIds: {},
+          formatRetries: 0,
+          lastError: null,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    };
+    await writeFile(dbPath, JSON.stringify(v2, null, 2), "utf8");
+
+    const store = new JsonStore(dbPath);
+    await store.initialize();
+
+    const data = store.snapshot();
+    expect(data.version).toBe(3);
+    expect(data.agents[0]).toMatchObject({ id: "agent-1", ownerId: null });
+    expect(data.sessions[0]).toMatchObject({ id: "session-1", ownerId: null });
+    expect(data.users).toEqual([]);
+    expect(data.authTokens).toEqual([]);
   });
 });

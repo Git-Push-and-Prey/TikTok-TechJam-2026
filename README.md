@@ -8,10 +8,12 @@ Run it locally with Docker, Colima, or rootless Podman, or deploy it to
 Volcengine ECS.
 
 > [!WARNING]
-> This is a single-user proof of concept. It intentionally has no identity,
-> authorization, or hardened sandbox middleware, and session logs are not
-> access-controlled beyond an optional shared token. Do not use production
-> data or credentials. See [SECURITY.md](SECURITY.md).
+> This is a hackathon proof of concept. Logged-in users each only see their
+> own Agents and Sessions, and anyone can self-register an account (there's
+> no invite/approval step), but there is no hardened sandbox middleware, no
+> RBAC, and session logs are only tagged with the owning user's id, not
+> access-controlled by it (still gated by an optional shared token). Do not
+> use production data or credentials. See [SECURITY.md](SECURITY.md).
 
 ## Screenshots
 
@@ -89,10 +91,11 @@ xdg-open http://localhost:3000   # Linux desktop
 
 In the Web UI:
 
-1. Select **Create Agent**.
-2. Enter a name, description, and workspace instructions.
-3. Select **Create Agent** again.
-4. Enter a task in the Playground, for example:
+1. Select **Need an account? Sign up** and create a username/password.
+2. Select **Create Agent**.
+3. Enter a name, description, and workspace instructions.
+4. Select **Create Agent** again.
+5. Enter a task in the Playground, for example:
 
    ```text
    Create a TypeScript hello-world CLI, add a test, and run it.
@@ -139,7 +142,6 @@ Required values in `.env`:
 
 ```dotenv
 OPENROUTER_API_KEY=your-openrouter-api-key
-APP_AUTH_TOKEN=replace-with-at-least-24-random-characters
 ```
 
 Start the application:
@@ -148,7 +150,8 @@ Start the application:
 docker compose up --build
 ```
 
-Open <http://localhost:3000>. Stop it without deleting Agent data:
+Open <http://localhost:3000> and select **Need an account? Sign up** to
+create a login. Stop it without deleting Agent data:
 
 ```bash
 docker compose down
@@ -173,6 +176,15 @@ APP_DATA_DIR=.data
 AGENT_WORKSPACE_ROOT=workspaces
 CODEX_HOME=codex-home
 LOGS_DIR=logs
+```
+
+Open the Web UI and select **Need an account? Sign up** to create a login.
+Alternatively, provision one without the browser — this reads/writes
+`APP_DATA_DIR` directly, so run it with the server stopped (or before
+starting it for the first time):
+
+```bash
+APP_DATA_DIR=.data npm run create-user -w @launchpad/server -- alice a-strong-password
 ```
 
 ### Session logs
@@ -214,7 +226,6 @@ cp deploy/volcengine/terraform.tfvars.example \
 | `OPENROUTER_API_KEY` | Required | OpenRouter API key (free tier available, no credit card). |
 | `OPENROUTER_MODEL` | `openrouter/free` | OpenRouter model slug; the default auto-routes to a free, tool-calling-capable model. |
 | `OPENROUTER_BASE_URL` | OpenRouter API endpoint | OpenRouter API base URL. |
-| `APP_AUTH_TOKEN` | Empty on loopback | Shared demo token; use 24+ random characters remotely. |
 | `RUNTIME_PROVIDER` | `local-process` | `container` for disposable local Runtime containers. |
 | `CODEX_SANDBOX_MODE` | `workspace-write` | Codex inner sandbox mode. |
 | `CODEX_TIMEOUT_MS` | `600000` | Maximum duration of one turn. |
@@ -254,6 +265,8 @@ docker compose config
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
+- [Multi-user login, sharing, and collaboration](docs/MULTI_USER_COLLABORATION.md)
+- [Multi-agent Sessions](docs/MULTI_AGENT_SESSIONS.md)
 - [Session logging architecture](docs/SESSION_LOGGING.md)
 - [Local POC](docs/LOCAL_POC.md)
 - [Deployment](docs/DEPLOYMENT.md)

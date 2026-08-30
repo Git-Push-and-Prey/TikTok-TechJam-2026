@@ -278,19 +278,36 @@ export interface Session {
 }
 ```
 
-`Database.version` is `2`; `JsonStore.initialize()` migrates a `version: 1`
-file in place on load (backfills `agents[].kind`, `messages[]`/`runs[]`
-`.sessionId`, adds `sessions: []`) rather than rejecting it, so existing
-local data survives the upgrade. `senderId`/`recipientId` were added after
-that migration and are optional for the same reason — no further version
-bump needed.
+`Database.version` is `3`; `JsonStore.initialize()` migrates older files in
+place on load (v1 backfills `agents[].kind`, `messages[]`/`runs[]`
+`.sessionId`, adds `sessions: []`; v2 adds `ownerId: null` to existing
+`agents[]`/`sessions[]` plus empty `users[]`/`authTokens[]`) rather than
+rejecting them, so existing local data survives the upgrade. `senderId`/
+`recipientId` were added between v1 and v2 and are optional for the same
+reason — no further version bump needed for those.
 
 ## Known limitations
 
-- No human identity/ownership model exists — Session membership controls
-  which *Agents* can be routed to, not which *humans* may operate a given
-  Session; the shared `APP_AUTH_TOKEN` still gates the whole API. See the
-  "Bouncer" extension seam in [ARCHITECTURE.md](ARCHITECTURE.md).
+- A Session has one owner (`Session.ownerId`, stamped at creation) plus
+  optional collaborators (`Session.collaboratorIds`) with full
+  read/participate access. Any Session member — owner or collaborator — can
+  contribute their own Agents to the roster (`updateMembers` only accepts
+  `add` ids the caller owns); removal is limited to your own contributed
+  Agents unless you're the owner, who can remove anyone's. Only the owner
+  can manage the collaborator list or delete the Session (403 for a
+  collaborator, 404 for anyone else). `/api/agents/*` itself is still
+  strictly single-owner — a Session's enriched response denormalizes each
+  roster Agent's name/status/contributing username so viewers can see
+  Agents they don't personally own, without granting any other access to
+  them. See [ARCHITECTURE.md](ARCHITECTURE.md).
+- Human turns are serialized session-wide via `stage !== "idle"` — a second
+  person's task message is rejected (409) while one is in flight, whoever
+  sent it. Comments (`kind: "comment"`, not addressed to the orchestrator)
+  are the one channel that stays open regardless of `stage`.
+- All Agents in a Session — orchestrator and every member — share one
+  workspace directory, and `pumpQueue` dispatches only one subtask at a
+  time, session-wide, specifically to avoid two Agents writing to that
+  directory concurrently (there's no file locking).
 - Deleting a member Agent while it's still referenced in `memberAgentIds`
   isn't actively prevented; `resolveMembers` treats a dangling id as "not
   found" at dispatch time (a skipped/failed result, not a crash) rather

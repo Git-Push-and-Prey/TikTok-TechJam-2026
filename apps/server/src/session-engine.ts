@@ -43,6 +43,18 @@ interface RoundResult {
   output: string;
 }
 
+/** `callerId === undefined` means an internal/trusted call — always allowed. */
+function hasSessionAccess(session: Session, callerId: string | null | undefined): boolean {
+  if (callerId === undefined) return true;
+  return session.ownerId === callerId || (session.collaboratorIds ?? []).includes(callerId ?? "");
+}
+
+function assertIsOwner(session: Session, callerId: string | null | undefined): void {
+  if (callerId !== undefined && session.ownerId !== callerId) {
+    throw new HttpError(403, "Only the Session owner can do this");
+  }
+}
+
 function summarizePlan(subtasks: DecomposedSubtask[], members: Agent[]): string {
   const lines = subtasks.map((subtask) => {
     const name = members.find((agent) => agent.id === subtask.agentId)?.name ?? "an Agent";
@@ -107,48 +119,55 @@ export class SessionEngine {
     });
   }
 
-  getSession(id: string): Session {
+  getSession(id: string, callerId?: string | null): Session {
     const session = this.store.snapshot().sessions.find((item) => item.id === id);
     if (!session) {
+      throw new HttpError(404, "Session not found");
+    }
+    if (!hasSessionAccess(session, callerId)) {
       throw new HttpError(404, "Session not found");
     }
     return session;
   }
 
-  listSessions(): Session[] {
+  listSessions(callerId: string): Session[] {
     return this.store
       .snapshot()
-      .sessions.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+      .sessions.filter((session) => hasSessionAccess(session, callerId))
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
-  transcriptFor(sessionId: string): Message[] {
-    this.getSession(sessionId);
+  transcriptFor(sessionId: string, callerId?: string | null): Message[] {
+    this.getSession(sessionId, callerId);
     return this.store
       .snapshot()
       .messages.filter((message) => message.sessionId === sessionId)
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
   }
 
-  async createSession(input: CreateSessionInput): Promise<Session> {
+  async createSession(input: CreateSessionInput, ownerId: string | null): Promise<Session> {
     const name = input.name.trim();
     const uniqueMembers = Array.from(new Set(input.memberAgentIds));
     if (uniqueMembers.length === 0) {
       throw new HttpError(400, "A Session needs at least one member Agent");
     }
     for (const agentId of uniqueMembers) {
-      const agent = this.agents.getAgent(agentId);
+      const agent = this.agents.getAgent(agentId, ownerId);
       if (agent.kind === "orchestrator") {
         throw new HttpError(400, "An orchestrator Agent cannot be a Session member");
       }
     }
     const id = randomUUID();
     const description = input.description?.trim() ?? "";
-    const orchestrator = await this.agents.createAgent({
-      name: `Orchestrator — ${name}`,
-      description: `Hidden routing orchestrator for the "${name}" Session.`,
-      instructions: ORCHESTRATOR_INSTRUCTIONS,
-      kind: "orchestrator",
-    });
+    const orchestrator = await this.agents.createAgent(
+      {
+        name: `Orchestrator — ${name}`,
+        description: `Hidden routing orchestrator for the "${name}" Session.`,
+        instructions: ORCHESTRATOR_INSTRUCTIONS,
+        kind: "orchestrator",
+      },
+      ownerId,
+    );
     const workspacePath = await this.workspaces.createSessionWorkspace(id, name, description);
     const timestamp = now();
     const session: Session = {
@@ -163,6 +182,7 @@ export class SessionEngine {
       memberThreadIds: {},
       formatRetries: 0,
       lastError: null,
+      ownerId,
       createdAt: timestamp,
       updatedAt: timestamp,
     };
@@ -170,12 +190,36 @@ export class SessionEngine {
     return session;
   }
 
-  async updateMembers(id: string, add: string[] = [], remove: string[] = []): Promise<Session> {
-    this.getSession(id);
+  /**
+   * Any Session member (owner or collaborator) can contribute their own
+   * Agents to the roster — `add` only accepts Agents the caller owns. A
+   * member can remove their own contributed Agents; only the owner can
+   * remove anyone else's.
+   */
+  async updateMembers(
+    id: string,
+    add: string[] = [],
+    remove: string[] = [],
+    callerId?: string | null,
+  ): Promise<Session> {
+    const session = this.getSession(id, callerId);
     for (const agentId of add) {
-      const agent = this.agents.getAgent(agentId);
+      const agent = this.agents.getAgent(agentId, callerId);
       if (agent.kind === "orchestrator") {
         throw new HttpError(400, "An orchestrator Agent cannot be a Session member");
+      }
+    }
+    for (const agentId of remove) {
+      if (callerId !== undefined && callerId !== session.ownerId) {
+        try {
+          const agent = this.agents.getAgent(agentId);
+          if (agent.ownerId !== callerId) {
+            throw new HttpError(403, "You can only remove Agents you contributed yourself");
+          }
+        } catch (error) {
+          if (error instanceof HttpError && error.statusCode === 404) continue; // already gone — nothing to protect
+          throw error;
+        }
       }
     }
     return this.store.mutate((database) => {
@@ -192,8 +236,30 @@ export class SessionEngine {
     });
   }
 
-  async stopSession(id: string): Promise<Session> {
-    const session = this.getSession(id);
+  async updateCollaborators(
+    id: string,
+    add: string[] = [],
+    remove: string[] = [],
+    ownerId?: string | null,
+  ): Promise<Session> {
+    const session = this.getSession(id, ownerId);
+    assertIsOwner(session, ownerId);
+    return this.store.mutate((database) => {
+      const stored = database.sessions.find((item) => item.id === id);
+      if (!stored) {
+        throw new HttpError(404, "Session not found");
+      }
+      const collaborators = new Set(stored.collaboratorIds ?? []);
+      for (const userId of add) collaborators.add(userId);
+      for (const userId of remove) collaborators.delete(userId);
+      stored.collaboratorIds = Array.from(collaborators);
+      stored.updatedAt = now();
+      return structuredClone(stored);
+    });
+  }
+
+  async stopSession(id: string, callerId?: string | null): Promise<Session> {
+    const session = this.getSession(id, callerId);
     this.clearTimers(id);
     this.queuedSubtasks.delete(id);
     this.roundResults.delete(id);
@@ -204,6 +270,8 @@ export class SessionEngine {
         : []),
     ]);
     for (const agentId of busyAgentIds) {
+      // Member Agents can be contributed by any collaborator, not just the
+      // Session owner — this is an internal/trusted stop, not a per-caller check.
       await this.agents.stopAgent(agentId).catch(() => undefined);
     }
     return this.store.mutate((database) => {
@@ -218,10 +286,11 @@ export class SessionEngine {
     });
   }
 
-  async deleteSession(id: string): Promise<void> {
-    const session = this.getSession(id);
+  async deleteSession(id: string, ownerId?: string | null): Promise<void> {
+    const session = this.getSession(id, ownerId);
+    assertIsOwner(session, ownerId);
     await this.stopSession(id).catch(() => undefined);
-    await this.agents.deleteAgent(session.orchestratorAgentId).catch(() => undefined);
+    await this.agents.deleteAgent(session.orchestratorAgentId, session.ownerId).catch(() => undefined);
     await this.workspaces.archiveSessionWorkspace(session.workspacePath, session.id).catch(() => undefined);
     await this.store.mutate((database) => {
       database.sessions = database.sessions.filter((item) => item.id !== id);
@@ -230,8 +299,13 @@ export class SessionEngine {
     });
   }
 
-  async handleUserMessage(sessionId: string, content: string): Promise<{ message: Message }> {
-    const session = this.getSession(sessionId);
+  async handleUserMessage(
+    sessionId: string,
+    content: string,
+    callerId?: string | null,
+    senderUsername?: string,
+  ): Promise<{ message: Message }> {
+    const session = this.getSession(sessionId, callerId);
     if (session.stage !== "idle") {
       throw new HttpError(409, "This Session is already handling a message");
     }
@@ -245,6 +319,8 @@ export class SessionEngine {
       sessionId,
       senderId: USER_PARTY,
       recipientId: session.orchestratorAgentId,
+      ...(callerId ? { senderUserId: callerId } : {}),
+      ...(senderUsername ? { senderUsername } : {}),
       createdAt: timestamp,
     };
     await this.store.mutate((database) => {
@@ -263,10 +339,43 @@ export class SessionEngine {
     return { message: userMessage };
   }
 
+  /**
+   * A human-to-human aside — never gated by `stage`, never dispatched to the
+   * orchestrator. The one channel that stays open while agents are busy.
+   */
+  async postComment(
+    sessionId: string,
+    content: string,
+    callerId: string | null | undefined,
+    senderUsername?: string,
+  ): Promise<{ message: Message }> {
+    const session = this.getSession(sessionId, callerId);
+    const timestamp = now();
+    const comment: Message = {
+      id: randomUUID(),
+      agentId: session.orchestratorAgentId,
+      runId: randomUUID(),
+      role: "user",
+      content,
+      sessionId,
+      kind: "comment",
+      senderId: USER_PARTY,
+      ...(callerId ? { senderUserId: callerId } : {}),
+      ...(senderUsername ? { senderUsername } : {}),
+      createdAt: timestamp,
+    };
+    await this.store.mutate((database) => {
+      database.messages.push(comment);
+    });
+    return { message: comment };
+  }
+
   private resolveMembers(session: Session): Agent[] {
     return session.memberAgentIds
       .map((agentId) => {
         try {
+          // Trusted lookup — member Agents can be owned by any collaborator,
+          // not just the Session owner; roster membership is the authorization.
           return this.agents.getAgent(agentId);
         } catch {
           return null;
@@ -341,7 +450,7 @@ export class SessionEngine {
     const orchestratorId = session.orchestratorAgentId;
     let run: AgentRun;
     try {
-      ({ run } = await this.agents.sendMessage(orchestratorId, prompt, {
+      ({ run } = await this.agents.sendMessage(orchestratorId, prompt, session.ownerId, {
         workspaceOverride: session.workspacePath,
         sessionId: session.id,
         sender: SYSTEM_PARTY,
@@ -374,7 +483,10 @@ export class SessionEngine {
 
   private async dispatchSubtask(session: Session, subtask: DecomposedSubtask): Promise<void> {
     try {
-      const { run } = await this.agents.sendMessage(subtask.agentId, subtask.task, {
+      // Trusted dispatch — the target may be a collaborator's own Agent, not
+      // the Session owner's; roster membership was already validated when it
+      // was added to memberAgentIds.
+      const { run } = await this.agents.sendMessage(subtask.agentId, subtask.task, undefined, {
         workspaceOverride: session.workspacePath,
         sessionId: session.id,
         sender: session.orchestratorAgentId,
@@ -404,26 +516,23 @@ export class SessionEngine {
     }
   }
 
+  /**
+   * Dispatches at most one subtask per call, session-wide — every Agent in a
+   * Session shares one workspace directory
+   * (`workspaceOverride: session.workspacePath`), so running more than one
+   * Codex process against it at a time risks unlocked concurrent writes.
+   * `maybeAdvanceAfterSettle` calls this again once that subtask settles,
+   * which drains the rest of the queue one at a time.
+   */
   private async pumpQueue(sessionId: string): Promise<void> {
     const queue = this.queuedSubtasks.get(sessionId) ?? [];
     if (queue.length === 0) return;
     const session = this.getSession(sessionId);
-    const busyAgentIds = new Set(session.pendingSubtasks.map((pending) => pending.agentId));
-    const remaining: DecomposedSubtask[] = [];
-    const toDispatch: DecomposedSubtask[] = [];
-    const claimedAgentIds = new Set<string>();
-    for (const subtask of queue) {
-      if (!busyAgentIds.has(subtask.agentId) && !claimedAgentIds.has(subtask.agentId)) {
-        toDispatch.push(subtask);
-        claimedAgentIds.add(subtask.agentId);
-      } else {
-        remaining.push(subtask);
-      }
-    }
+    if (session.pendingSubtasks.length > 0) return; // something is already mid-turn; wait for it to settle
+    const [subtask, ...remaining] = queue;
+    if (!subtask) return;
     this.queuedSubtasks.set(sessionId, remaining);
-    for (const subtask of toDispatch) {
-      await this.dispatchSubtask(session, subtask);
-    }
+    await this.dispatchSubtask(session, subtask);
   }
 
   private async handleRunSettled(agentId: string, run: AgentRun): Promise<void> {

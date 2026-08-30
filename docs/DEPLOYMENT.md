@@ -88,7 +88,6 @@ dedicated ECS instance for this POC.
 git clone https://github.com/your-org/volc-agent-launchpad.git
 cd volc-agent-launchpad
 cp .env.example .env.production
-openssl rand -hex 32
 ```
 
 Set these values in `.env.production`:
@@ -96,7 +95,6 @@ Set these values in `.env.production`:
 ```dotenv
 PUBLIC_PORT=80
 OPENROUTER_API_KEY=your-openrouter-api-key
-APP_AUTH_TOKEN=the-random-token-generated-above
 ```
 
 Deploy:
@@ -106,13 +104,15 @@ chmod 600 .env.production
 ./scripts/deploy-existing-ecs.sh .env.production
 ```
 
+Anyone who can reach the URL can self-register an account from the login
+screen (**Need an account? Sign up**) — there's no invite or approval step.
+If that's not acceptable for this deployment, restrict network access (see
+below) before going live; there's no way to disable signup short of that.
+
 Verify:
 
 ```bash
 curl http://127.0.0.1/api/health
-export APP_AUTH_TOKEN=your-shared-demo-token
-curl -H "Authorization: Bearer $APP_AUTH_TOKEN" \
-  http://127.0.0.1/api/system
 docker compose --env-file .env.production ps
 ```
 
@@ -123,7 +123,7 @@ Deploy updates with `git pull --ff-only`, then rerun the deployment script.
 - Allow TCP 80 only from the event network.
 - Allow TCP 22 only from administrator IP addresses.
 - Allow outbound HTTPS to OpenRouter and package registries.
-- Add HTTPS before using `APP_AUTH_TOKEN` across an untrusted network.
+- Add HTTPS before logging in across an untrusted network.
 
 Stop the application without deleting Agent data:
 

@@ -105,12 +105,14 @@ Each line is one JSON object (JSONL — one record per line, no wrapping
 array, so a writer can always `appendFile` without reading the file first):
 
 ```json
-{"ts":"2026-08-29T10:00:01.000Z","sessionId":"<agentId>","agentName":"Docs Bot","runId":"<runId>","type":"tool_call","itemType":"command_execution","status":"succeeded","summary":"npm test","detail":{"command":"npm test","exitCode":0}}
+{"ts":"2026-08-29T10:00:01.000Z","sessionId":"<agentId>","agentName":"Docs Bot","runId":"<runId>","ownerId":"<userId>","type":"tool_call","itemType":"command_execution","status":"succeeded","summary":"npm test","detail":{"command":"npm test","exitCode":0}}
 ```
 
 Common envelope on every line: `ts`, `sessionId` (the Agent id), `agentName`
 (denormalized so the viewer never needs to call back into the main server or
-its store), `runId`, `type`. The `type` determines the rest of the shape:
+its store), `runId`, `ownerId` (the `User.id` that owns the Agent — `null`
+for Agents that predate login, also denormalized rather than looked up),
+`type`. The `type` determines the rest of the shape:
 
 | `type` | Extra fields |
 | --- | --- |
@@ -138,8 +140,7 @@ runs it through two guards:
   inside `detail` (e.g. a command echoing an env var).
 
 This is pattern-based redaction, not a verified DLP system — treat it as a
-best-effort safety net, the same caveat that applies to `APP_AUTH_TOKEN`
-elsewhere in this repo (see [SECURITY.md](../SECURITY.md)).
+best-effort safety net (see [SECURITY.md](../SECURITY.md)).
 
 ## The log viewer is a separate service, on purpose
 
@@ -150,10 +151,10 @@ in `LOGS_DIR`. That means:
 - It can be built, deployed, scaled, and taken down independently of the
   main control plane (own `package.json`, own `Dockerfile.log-viewer`, own
   `docker-compose.yml` service).
-- It never needs the `APP_AUTH_TOKEN` or `OPENROUTER_API_KEY` — its own
-  optional `LOG_VIEWER_AUTH_TOKEN` gates its API the same way
-  `APP_AUTH_TOKEN` gates the main API (shared bearer token,
-  `timingSafeEqual` comparison).
+- It never needs a login or the `OPENROUTER_API_KEY` — its own optional
+  `LOG_VIEWER_AUTH_TOKEN` gates its API with a shared bearer token
+  (`timingSafeEqual` comparison), independent of per-user login on the main
+  app.
 - Losing it, restarting it, or pointing a different instance at the same
   `LOGS_DIR` has no effect on Agent Runs — it is a read-only observer.
 
@@ -187,7 +188,7 @@ read-write and the viewer read-only).
 | Variable | Applies to | Purpose |
 | --- | --- | --- |
 | `LOGS_DIR` | server, log-viewer | Where session log files live. Must point both services at the same directory/volume. |
-| `LOG_VIEWER_AUTH_TOKEN` | log-viewer | Optional shared bearer token gating the viewer's API, independent of `APP_AUTH_TOKEN`. |
+| `LOG_VIEWER_AUTH_TOKEN` | log-viewer | Optional shared bearer token gating the viewer's API, independent of the main app's per-user login. |
 
 ## Known limitations
 
@@ -196,9 +197,9 @@ read-write and the viewer read-only).
   session file itself (only individual fields are truncated). A very long
   or very chatty Agent conversation will keep growing one file indefinitely.
 - No authentication ties a log-viewer session back to the human who sent the
-  original message — the log-viewer's token (like `APP_AUTH_TOKEN`) is a
-  shared secret, not per-user identity. See the "Bouncer" extension seam in
-  [ARCHITECTURE.md](ARCHITECTURE.md) if you need that.
+  original message — the log-viewer's token is a shared secret, not per-user
+  identity, unlike the main app's per-user login. See
+  [ARCHITECTURE.md](ARCHITECTURE.md) if you need that extended to logs.
 - Filtering is a substring match over serialized JSON, not full-text search
   with ranking — sufficient for browsing one session's log, not for
   searching across every session at once (the current UI filters the

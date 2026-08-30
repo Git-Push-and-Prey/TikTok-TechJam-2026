@@ -1,13 +1,20 @@
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
-import { timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { AppConfig } from "./config.js";
 import { HttpError } from "./errors.js";
 import type { AgentService } from "./agent-service.js";
+import type { AuthService } from "./auth.js";
 import type { SessionEngine } from "./session-engine.js";
+import type { Session } from "./types.js";
+
+declare module "fastify" {
+  interface FastifyRequest {
+    userId: string;
+  }
+}
 
 const agentIdParams = z.object({ id: z.string().uuid() });
 const runIdParams = z.object({ id: z.string().uuid() });
@@ -21,8 +28,12 @@ const updateAgentBody = createAgentBody.partial().refine(
   (value) => Object.keys(value).length > 0,
   "At least one field is required",
 );
+const shareAgentBody = z.object({
+  username: z.string().trim().min(1),
+});
 const messageBody = z.object({
   content: z.string().trim().min(1).max(50_000),
+  kind: z.enum(["task", "comment"]).default("task"),
 });
 const createSessionBody = z.object({
   name: z.string().trim().min(1).max(80),
@@ -38,11 +49,29 @@ const updateSessionMembersBody = z
     (value) => (value.add?.length ?? 0) + (value.remove?.length ?? 0) > 0,
     "At least one of add/remove is required",
   );
+const loginBody = z.object({
+  username: z.string().trim().min(1),
+  password: z.string().min(1),
+});
+const registerBody = z.object({
+  username: z.string().trim().min(1).max(80),
+  password: z.string().min(8).max(200),
+});
+const updateSessionCollaboratorsBody = z
+  .object({
+    add: z.array(z.string().trim().min(1)).optional(),
+    remove: z.array(z.string().trim().min(1)).optional(),
+  })
+  .refine(
+    (value) => (value.add?.length ?? 0) + (value.remove?.length ?? 0) > 0,
+    "At least one of add/remove is required",
+  );
 
 export async function createApp(
   config: AppConfig,
   service: AgentService,
   sessions: SessionEngine,
+  auth: AuthService,
 ): Promise<FastifyInstance> {
   const app = Fastify({
     logger: {
@@ -59,25 +88,53 @@ export async function createApp(
         : false,
   });
 
+  /**
+   * Adds display-only fields to a Session response: resolved collaborator
+   * usernames, whether the caller is the owner, and — since the roster can
+   * hold Agents contributed by different collaborators, each still strictly
+   * single-owner via `AgentService` — a read-only roster listing (name,
+   * status, contributing username) so a viewer can see Agents they don't
+   * personally own without that granting them any other access to those Agents.
+   */
+  function enrichSession(session: Session, callerId: string) {
+    const collaborators = (session.collaboratorIds ?? [])
+      .map((id) => auth.getUserById(id))
+      .filter((user): user is { id: string; username: string } => user !== null);
+    const members = session.memberAgentIds
+      .map((id) => {
+        try {
+          const agent = service.getAgent(id);
+          return {
+            id: agent.id,
+            name: agent.name,
+            status: agent.status,
+            ownerId: agent.ownerId,
+            ownerUsername: agent.ownerId ? (auth.getUserById(agent.ownerId)?.username ?? null) : null,
+          };
+        } catch {
+          return null;
+        }
+      })
+      .filter((member): member is NonNullable<typeof member> => member !== null);
+    return { ...session, collaborators, members, isOwner: session.ownerId === callerId };
+  }
+
   app.addHook("onRequest", async (request, reply) => {
     if (
-      !config.authToken ||
       !request.url.startsWith("/api/") ||
       request.url === "/api/health" ||
-      request.url === "/api/auth"
+      request.url === "/api/auth/login" ||
+      request.url === "/api/auth/register"
     ) {
       return;
     }
     const header = request.headers.authorization ?? "";
-    const candidate = header.startsWith("Bearer ") ? header.slice(7) : "";
-    const expectedBuffer = Buffer.from(config.authToken);
-    const candidateBuffer = Buffer.from(candidate);
-    const valid =
-      candidateBuffer.length === expectedBuffer.length &&
-      timingSafeEqual(candidateBuffer, expectedBuffer);
-    if (!valid) {
+    const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+    const user = token ? await auth.resolveToken(token) : null;
+    if (!user) {
       return reply.code(401).send({ error: "Authentication required" });
     }
+    request.userId = user.id;
   });
 
   app.get("/api/health", async () => ({
@@ -85,105 +142,162 @@ export async function createApp(
     service: "volc-agent-launchpad",
   }));
 
-  app.get("/api/auth", async () => ({ required: config.authToken.length > 0 }));
+  app.post("/api/auth/login", async (request) => {
+    const body = loginBody.parse(request.body);
+    return auth.login(body.username, body.password);
+  });
+
+  app.post("/api/auth/register", async (request, reply) => {
+    const body = registerBody.parse(request.body);
+    const result = await auth.register(body.username, body.password);
+    return reply.code(201).send(result);
+  });
+
+  app.post("/api/auth/logout", async (request, reply) => {
+    const header = request.headers.authorization ?? "";
+    const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+    await auth.logout(token);
+    return reply.code(204).send();
+  });
+
+  app.get("/api/auth/me", async (request) => ({
+    user: auth.getUserById(request.userId),
+  }));
 
   app.get("/api/system", async () => service.systemInfo());
 
-  app.get("/api/agents", async () => ({ agents: service.listAgents() }));
+  app.get("/api/agents", async (request) => ({
+    agents: service.listAgents(request.userId),
+  }));
 
   app.post("/api/agents", async (request, reply) => {
     const body = createAgentBody.parse(request.body);
-    const agent = await service.createAgent(body);
+    const agent = await service.createAgent(body, request.userId);
     return reply.code(201).send({ agent });
   });
 
   app.get("/api/agents/:id", async (request) => {
     const { id } = agentIdParams.parse(request.params);
-    return { agent: service.getAgent(id) };
+    return { agent: service.getAgent(id, request.userId) };
   });
 
   app.patch("/api/agents/:id", async (request) => {
     const { id } = agentIdParams.parse(request.params);
     const body = updateAgentBody.parse(request.body);
-    return { agent: await service.updateAgent(id, body) };
+    return { agent: await service.updateAgent(id, body, request.userId) };
   });
 
   app.delete("/api/agents/:id", async (request) => {
     const { id } = agentIdParams.parse(request.params);
-    return service.deleteAgent(id);
+    return service.deleteAgent(id, request.userId);
+  });
+
+  app.post("/api/agents/:id/share", async (request, reply) => {
+    const { id } = agentIdParams.parse(request.params);
+    const body = shareAgentBody.parse(request.body);
+    const target = auth.getUserByUsername(body.username);
+    if (!target) {
+      throw new HttpError(404, `User "${body.username}" not found`);
+    }
+    const agent = await service.shareAgent(id, request.userId, target.id);
+    return reply.code(201).send({ agent });
   });
 
   app.post("/api/agents/:id/start", async (request) => {
     const { id } = agentIdParams.parse(request.params);
-    return { agent: await service.startAgent(id) };
+    return { agent: await service.startAgent(id, request.userId) };
   });
 
   app.post("/api/agents/:id/stop", async (request) => {
     const { id } = agentIdParams.parse(request.params);
-    return { agent: await service.stopAgent(id) };
+    return { agent: await service.stopAgent(id, request.userId) };
   });
 
   app.get("/api/agents/:id/messages", async (request) => {
     const { id } = agentIdParams.parse(request.params);
-    return { messages: service.getMessages(id) };
+    return { messages: service.getMessages(id, request.userId) };
   });
 
   app.get("/api/agents/:id/runs", async (request) => {
     const { id } = agentIdParams.parse(request.params);
-    return { runs: service.getRuns(id) };
+    return { runs: service.getRuns(id, request.userId) };
   });
 
   app.post("/api/agents/:id/messages", async (request, reply) => {
     const { id } = agentIdParams.parse(request.params);
     const body = messageBody.parse(request.body);
-    const result = await service.sendMessage(id, body.content);
+    const result = await service.sendMessage(id, body.content, request.userId);
     return reply.code(202).send(result);
   });
 
   app.get("/api/runs/:id", async (request) => {
     const { id } = runIdParams.parse(request.params);
-    return { run: service.getRun(id) };
+    return { run: service.getRun(id, request.userId) };
   });
 
-  app.get("/api/sessions", async () => ({ sessions: sessions.listSessions() }));
+  app.get("/api/sessions", async (request) => ({
+    sessions: sessions.listSessions(request.userId).map((session) => enrichSession(session, request.userId)),
+  }));
 
   app.post("/api/sessions", async (request, reply) => {
     const body = createSessionBody.parse(request.body);
-    const session = await sessions.createSession(body);
-    return reply.code(201).send({ session });
+    const session = await sessions.createSession(body, request.userId);
+    return reply.code(201).send({ session: enrichSession(session, request.userId) });
   });
 
   app.get("/api/sessions/:id", async (request) => {
     const { id } = sessionIdParams.parse(request.params);
-    return { session: sessions.getSession(id) };
+    return { session: enrichSession(sessions.getSession(id, request.userId), request.userId) };
   });
 
   app.patch("/api/sessions/:id/members", async (request) => {
     const { id } = sessionIdParams.parse(request.params);
     const body = updateSessionMembersBody.parse(request.body);
-    return { session: await sessions.updateMembers(id, body.add, body.remove) };
+    const session = await sessions.updateMembers(id, body.add, body.remove, request.userId);
+    return { session: enrichSession(session, request.userId) };
+  });
+
+  app.patch("/api/sessions/:id/collaborators", async (request) => {
+    const { id } = sessionIdParams.parse(request.params);
+    const body = updateSessionCollaboratorsBody.parse(request.body);
+    const resolve = (username: string) => {
+      const user = auth.getUserByUsername(username);
+      if (!user) {
+        throw new HttpError(404, `User "${username}" not found`);
+      }
+      return user.id;
+    };
+    const add = (body.add ?? []).map(resolve);
+    const remove = (body.remove ?? []).map(resolve);
+    const session = await sessions.updateCollaborators(id, add, remove, request.userId);
+    return { session: enrichSession(session, request.userId) };
   });
 
   app.delete("/api/sessions/:id", async (request, reply) => {
     const { id } = sessionIdParams.parse(request.params);
-    await sessions.deleteSession(id);
+    await sessions.deleteSession(id, request.userId);
     return reply.code(204).send();
   });
 
   app.post("/api/sessions/:id/stop", async (request) => {
     const { id } = sessionIdParams.parse(request.params);
-    return { session: await sessions.stopSession(id) };
+    const session = await sessions.stopSession(id, request.userId);
+    return { session: enrichSession(session, request.userId) };
   });
 
   app.get("/api/sessions/:id/messages", async (request) => {
     const { id } = sessionIdParams.parse(request.params);
-    return { messages: sessions.transcriptFor(id) };
+    return { messages: sessions.transcriptFor(id, request.userId) };
   });
 
   app.post("/api/sessions/:id/messages", async (request, reply) => {
     const { id } = sessionIdParams.parse(request.params);
     const body = messageBody.parse(request.body);
-    const result = await sessions.handleUserMessage(id, body.content);
+    const username = auth.getUserById(request.userId)?.username;
+    const result =
+      body.kind === "comment"
+        ? await sessions.postComment(id, body.content, request.userId, username)
+        : await sessions.handleUserMessage(id, body.content, request.userId, username);
     return reply.code(202).send(result);
   });
 

@@ -12,6 +12,7 @@ export interface SessionEntry {
   sessionId?: string;
   agentName?: string;
   runId?: string;
+  ownerId?: string | null;
   type?: string;
   [key: string]: unknown;
 }
@@ -19,6 +20,7 @@ export interface SessionEntry {
 export interface SessionSummary {
   sessionId: string;
   agentName: string | null;
+  ownerId: string | null;
   entryCount: number;
   firstAt: string | null;
   lastAt: string | null;
@@ -87,14 +89,17 @@ export class SessionLogReader {
   private summarize(sessionId: string, entries: SessionEntry[]): SessionSummary {
     const counts: Record<string, number> = {};
     let agentName: string | null = null;
+    let ownerId: string | null = null;
     for (const entry of entries) {
       const type = entry.type ?? "unknown";
       counts[type] = (counts[type] ?? 0) + 1;
       if (typeof entry.agentName === "string" && entry.agentName) agentName = entry.agentName;
+      if (typeof entry.ownerId === "string" && entry.ownerId) ownerId = entry.ownerId;
     }
     return {
       sessionId,
       agentName,
+      ownerId,
       entryCount: entries.length,
       firstAt: entries[0]?.ts ?? null,
       lastAt: entries.at(-1)?.ts ?? null,

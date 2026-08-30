@@ -28,12 +28,27 @@ describe("SessionLogReader", () => {
     expect(await reader.listSessions()).toEqual([]);
   });
 
-  it("summarizes each session file into one entry with counts and timestamps", async () => {
+  it("summarizes each session file into one entry with counts, timestamps, and owner", async () => {
     const logsDir = await makeLogsDir({
       "agent-1.log": [
-        JSON.stringify({ ts: "2026-01-01T00:00:00.000Z", type: "user_message", agentName: "Builder" }),
-        JSON.stringify({ ts: "2026-01-01T00:00:05.000Z", type: "tool_call", agentName: "Builder" }),
-        JSON.stringify({ ts: "2026-01-01T00:00:10.000Z", type: "agent_response", agentName: "Builder" }),
+        JSON.stringify({
+          ts: "2026-01-01T00:00:00.000Z",
+          type: "user_message",
+          agentName: "Builder",
+          ownerId: "owner-1",
+        }),
+        JSON.stringify({
+          ts: "2026-01-01T00:00:05.000Z",
+          type: "tool_call",
+          agentName: "Builder",
+          ownerId: "owner-1",
+        }),
+        JSON.stringify({
+          ts: "2026-01-01T00:00:10.000Z",
+          type: "agent_response",
+          agentName: "Builder",
+          ownerId: "owner-1",
+        }),
       ],
     });
     const reader = new SessionLogReader(logsDir);
@@ -42,12 +57,24 @@ describe("SessionLogReader", () => {
       {
         sessionId: "agent-1",
         agentName: "Builder",
+        ownerId: "owner-1",
         entryCount: 3,
         firstAt: "2026-01-01T00:00:00.000Z",
         lastAt: "2026-01-01T00:00:10.000Z",
         counts: { user_message: 1, tool_call: 1, agent_response: 1 },
       },
     ]);
+  });
+
+  it("reports a null owner for legacy entries written before login existed", async () => {
+    const logsDir = await makeLogsDir({
+      "agent-legacy.log": [
+        JSON.stringify({ ts: "2026-01-01T00:00:00.000Z", type: "user_message", agentName: "Old" }),
+      ],
+    });
+    const reader = new SessionLogReader(logsDir);
+    const sessions = await reader.listSessions();
+    expect(sessions[0]?.ownerId).toBeNull();
   });
 
   it("filters entries by a case-insensitive keyword", async () => {

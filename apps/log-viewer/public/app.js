@@ -109,8 +109,12 @@
       meta.className = "meta";
       meta.textContent =
         session.entryCount + " entries · " + (session.lastAt ? new Date(session.lastAt).toLocaleString() : "—");
+      const owner = document.createElement("div");
+      owner.className = "meta";
+      owner.textContent = "Owner: " + (session.ownerId ? session.ownerId.slice(0, 8) : "—");
       item.appendChild(name);
       item.appendChild(meta);
+      item.appendChild(owner);
       item.addEventListener("click", () => selectSession(session.sessionId));
       els.sessionList.appendChild(item);
     }
@@ -158,9 +162,13 @@
       const run = document.createElement("span");
       run.className = "entry-run";
       run.textContent = entry.runId ? "run " + entry.runId.slice(0, 8) : "";
+      const owner = document.createElement("span");
+      owner.className = "entry-run";
+      owner.textContent = entry.ownerId ? "owner " + entry.ownerId.slice(0, 8) : "";
       header.appendChild(badge);
       header.appendChild(ts);
       header.appendChild(run);
+      header.appendChild(owner);
 
       const body = document.createElement("div");
       body.className = "entry-body";

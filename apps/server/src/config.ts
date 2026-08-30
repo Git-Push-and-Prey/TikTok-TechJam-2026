@@ -33,12 +33,6 @@ const envSchema = z.object({
     .max(48)
     .regex(/^[a-zA-Z0-9_.-]+$/)
     .default("default"),
-  APP_AUTH_TOKEN: z
-    .string()
-    .trim()
-    .max(128)
-    .regex(/^[A-Za-z0-9._~-]*$/, "APP_AUTH_TOKEN must use URL-safe characters")
-    .optional(),
   OPENROUTER_API_KEY: z.string().optional(),
   OPENROUTER_MODEL: z.string().optional(),
   OPENROUTER_BASE_URL: z
@@ -52,15 +46,6 @@ export type AppConfig = ReturnType<typeof loadConfig>;
 
 export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
   const env = envSchema.parse(environment);
-  const authToken = env.APP_AUTH_TOKEN?.trim() ?? "";
-  const loopbackHosts = new Set(["127.0.0.1", "::1", "localhost"]);
-  if (env.NODE_ENV === "production" && !loopbackHosts.has(env.HOST)) {
-    if (authToken.length < 24 || authToken.startsWith("replace-")) {
-      throw new Error(
-        "APP_AUTH_TOKEN must contain at least 24 characters for a non-loopback production server",
-      );
-    }
-  }
   const defaultContainerUser =
     typeof process.getuid === "function" && typeof process.getgid === "function"
       ? process.getuid() + ":" + process.getgid()
@@ -85,7 +70,6 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     containerPidsLimit: env.CONTAINER_PIDS_LIMIT,
     containerUser: env.CONTAINER_USER?.trim() || defaultContainerUser,
     runtimeInstanceId: env.RUNTIME_INSTANCE_ID,
-    authToken,
     openrouterApiKey: env.OPENROUTER_API_KEY?.trim() ?? "",
     openrouterModel: env.OPENROUTER_MODEL?.trim() ?? "",
     openrouterBaseUrl: env.OPENROUTER_BASE_URL.replace(/\/+$/, ""),

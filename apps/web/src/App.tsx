@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, setAuthToken } from "./api";
 import { SYSTEM_PARTY, USER_PARTY } from "./types";
-import type { Agent, AgentRun, Message, Session, SessionStage, SystemInfo } from "./types";
+import type { Agent, AgentRun, Message, Session, SessionStage, SystemInfo, User } from "./types";
+
+const AUTH_TOKEN_STORAGE_KEY = "launchpad.authToken";
 
 const starterPrompts = [
   "Create a small TypeScript CLI that prints a weather summary from sample JSON.",
@@ -35,9 +37,10 @@ function sessionStatusClass(stage: SessionStage): "ready" | "busy" | "error" {
   return "busy";
 }
 
-function agentDisplayName(agents: Agent[], session: Session, agentId: string): string {
+/** Uses the Session's own denormalized roster (`session.members`), not the viewer's own Agent list — a collaborator can see roster Agent names even for Agents they don't own. */
+function agentDisplayName(session: Session, agentId: string): string {
   if (agentId === session.orchestratorAgentId) return "Orchestrator";
-  return agents.find((agent) => agent.id === agentId)?.name ?? "Unknown Agent";
+  return session.members.find((member) => member.id === agentId)?.name ?? "Unknown Agent";
 }
 
 /** A message belongs in the default (non-detail) view iff the user is a party to it — sender or recipient. Rows written before senderId/recipientId existed default to visible. */
@@ -46,10 +49,19 @@ function isUserFacing(message: Message): boolean {
   return message.senderId === USER_PARTY || message.recipientId === USER_PARTY;
 }
 
-function partyLabel(agents: Agent[], session: Session, partyId: string | undefined): string {
-  if (!partyId || partyId === USER_PARTY) return "You";
+function partyLabel(
+  session: Session,
+  partyId: string | undefined,
+  sender?: { senderUserId?: string; senderUsername?: string; currentUserId?: string },
+): string {
+  if (!partyId || partyId === USER_PARTY) {
+    if (sender?.senderUsername && sender.senderUserId !== sender.currentUserId) {
+      return sender.senderUsername;
+    }
+    return "You";
+  }
   if (partyId === SYSTEM_PARTY) return "System";
-  return agentDisplayName(agents, session, partyId);
+  return agentDisplayName(session, partyId);
 }
 
 function StatusPill({ status }: { status: Agent["status"] }) {
@@ -77,8 +89,11 @@ export default function App() {
   const [activeRun, setActiveRun] = useState<AgentRun | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [authRequired, setAuthRequired] = useState<boolean | null>(null);
-  const [authInput, setAuthInput] = useState("");
+  const [authed, setAuthed] = useState<boolean | null>(null);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [authMode, setAuthMode] = useState<"login" | "signup">("login");
+  const [loginUsername, setLoginUsername] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
   const [view, setView] = useState<"playground" | "sessions">("playground");
   const [sessionsList, setSessionsList] = useState<Session[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
@@ -88,6 +103,7 @@ export default function App() {
   const [showSessionDetails, setShowSessionDetails] = useState(false);
   const [sessionForm, setSessionForm] = useState(emptySessionForm);
   const [sessionPrompt, setSessionPrompt] = useState("");
+  const [composeMode, setComposeMode] = useState<"task" | "comment">("task");
   const messageEnd = useRef<HTMLDivElement>(null);
   const sessionMessageEnd = useRef<HTMLDivElement>(null);
   const selectedIdRef = useRef<string | null>(null);
@@ -141,7 +157,15 @@ export default function App() {
   const refreshSessionMessages = useCallback(async (sessionId: string) => {
     const result = await api.sessionMessages(sessionId);
     if (mountedRef.current && selectedSessionIdRef.current === sessionId) {
-      setSessionMessages(result.messages);
+      // Continuous polling re-fetches even when nothing changed — keep the
+      // same array reference in that case so the auto-scroll effect (which
+      // runs on every `sessionMessages` change) doesn't fire for a no-op poll.
+      setSessionMessages((current) =>
+        current.length === result.messages.length &&
+        JSON.stringify(current) === JSON.stringify(result.messages)
+          ? current
+          : result.messages,
+      );
     }
   }, []);
 
@@ -151,14 +175,28 @@ export default function App() {
 
   useEffect(() => {
     mountedRef.current = true;
+    const stored = localStorage.getItem(AUTH_TOKEN_STORAGE_KEY);
+    if (!stored) {
+      setAuthed(false);
+      return () => {
+        mountedRef.current = false;
+      };
+    }
+    setAuthToken(stored);
     void api
-      .auth()
-      .then(async ({ required }) => {
+      .me()
+      .then(async ({ user }) => {
         if (!mountedRef.current) return;
-        setAuthRequired(required);
-        if (!required) await bootstrap();
+        setCurrentUser(user);
+        setAuthed(true);
+        await bootstrap();
       })
-      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+      .catch(() => {
+        if (!mountedRef.current) return;
+        localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+        setAuthToken("");
+        setAuthed(false);
+      });
     return () => {
       mountedRef.current = false;
     };
@@ -206,27 +244,33 @@ export default function App() {
   }, [sessionMessages]);
 
   useEffect(() => {
-    if (view === "sessions" && authRequired === false) {
+    if (view === "sessions" && authed === true) {
       void refreshSessions().catch((reason) =>
         setError(reason instanceof Error ? reason.message : String(reason)),
       );
     }
-  }, [view, authRequired, refreshSessions]);
+  }, [view, authed, refreshSessions]);
 
+  /**
+   * Keeps polling a selected Session's transcript/status for as long as it stays
+   * selected — not just while it's actively working — so a collaborator looking
+   * at an already-idle Session still sees someone else's new message appear.
+   * Polls faster while the orchestrator is busy, gentler while idle.
+   */
   const pollSessionStage = useCallback(
     async (sessionId: string) => {
       if (pollingSessionIds.current.has(sessionId)) return;
       pollingSessionIds.current.add(sessionId);
       try {
-        while (mountedRef.current) {
-          await new Promise((resolve) => window.setTimeout(resolve, 900));
-          if (!mountedRef.current) return;
+        while (mountedRef.current && selectedSessionIdRef.current === sessionId) {
           const { session } = await api.getSession(sessionId);
+          if (!mountedRef.current || selectedSessionIdRef.current !== sessionId) return;
           setSessionsList((current) =>
             current.map((item) => (item.id === session.id ? session : item)),
           );
           await refreshSessionMessages(sessionId);
-          if (session.stage === "idle" || session.stage === "failed") return;
+          const delay = session.stage === "idle" || session.stage === "failed" ? 3000 : 900;
+          await new Promise((resolve) => window.setTimeout(resolve, delay));
         }
       } finally {
         pollingSessionIds.current.delete(sessionId);
@@ -247,9 +291,7 @@ export default function App() {
         setSessionsList((current) =>
           current.map((item) => (item.id === result.session.id ? result.session : item)),
         );
-        if (result.session.stage !== "idle" && result.session.stage !== "failed") {
-          void pollSessionStage(sessionId);
-        }
+        void pollSessionStage(sessionId);
       })
       .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
   }, [selectedSessionId, refreshSessionMessages, pollSessionStage]);
@@ -315,6 +357,24 @@ export default function App() {
     try {
       await api.deleteAgent(selected.id);
       await refreshAgents();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const shareAgent = async () => {
+    if (!selected) return;
+    const username = window.prompt(
+      "Share a clone of \"" + selected.name + "\" with which username?",
+    );
+    if (!username?.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.shareAgent(selected.id, username.trim());
+      window.alert("Shared a clone of \"" + selected.name + "\" with " + username.trim() + ".");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -404,6 +464,40 @@ export default function App() {
     }
   };
 
+  const addCollaborator = async () => {
+    if (!selectedSession) return;
+    const username = window.prompt("Add which username as a collaborator on this Session?");
+    if (!username?.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const { session } = await api.updateSessionCollaborators(selectedSession.id, {
+        add: [username.trim()],
+      });
+      setSessionsList((current) => current.map((item) => (item.id === session.id ? session : item)));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeCollaborator = async (username: string) => {
+    if (!selectedSession) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const { session } = await api.updateSessionCollaborators(selectedSession.id, {
+        remove: [username],
+      });
+      setSessionsList((current) => current.map((item) => (item.id === session.id ? session : item)));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const stopSelectedSession = async () => {
     if (!selectedSession) return;
     setBusy(true);
@@ -440,37 +534,51 @@ export default function App() {
     event.preventDefault();
     if (!selectedSession || !sessionPrompt.trim()) return;
     const content = sessionPrompt.trim();
+    const mode = composeMode;
     setSessionPrompt("");
     setError(null);
     try {
-      const result = await api.sendSessionMessage(selectedSession.id, content);
+      const result = await api.sendSessionMessage(selectedSession.id, content, mode);
       if (selectedSessionIdRef.current === selectedSession.id) {
         setSessionMessages((current) => [...current, result.message]);
       }
-      setSessionsList((current) =>
-        current.map((item) =>
-          item.id === selectedSession.id ? { ...item, stage: "decomposing" } : item,
-        ),
-      );
-      await pollSessionStage(selectedSession.id);
+      if (mode === "task") {
+        setSessionsList((current) =>
+          current.map((item) =>
+            item.id === selectedSession.id ? { ...item, stage: "decomposing" } : item,
+          ),
+        );
+        await pollSessionStage(selectedSession.id);
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
       await refreshSessions();
     }
   };
 
-  const unlock = async (event: React.FormEvent) => {
+  const submitAuth = async (event: React.FormEvent) => {
     event.preventDefault();
     setBusy(true);
     setError(null);
-    setAuthToken(authInput);
     try {
+      const { token, user } =
+        authMode === "login"
+          ? await api.login(loginUsername, loginPassword)
+          : await api.register(loginUsername, loginPassword);
+      localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
+      setAuthToken(token);
       await bootstrap();
-      setAuthRequired(false);
-      setAuthInput("");
+      setCurrentUser(user);
+      setAuthed(true);
+      setLoginUsername("");
+      setLoginPassword("");
     } catch (reason) {
       if (reason instanceof ApiError && reason.status === 401) {
-        setError("The access token is not valid.");
+        setError("That username or password is not valid.");
+      } else if (reason instanceof ApiError && reason.status === 409) {
+        setError("That username is already taken.");
+      } else if (reason instanceof ApiError && reason.status === 400) {
+        setError(reason.message);
       } else {
         setError(reason instanceof Error ? reason.message : String(reason));
       }
@@ -479,7 +587,17 @@ export default function App() {
     }
   };
 
-  if (authRequired === null) {
+  const logout = async () => {
+    await api.logout().catch(() => undefined);
+    localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+    setAuthToken("");
+    setCurrentUser(null);
+    setAgents([]);
+    setSessionsList([]);
+    setAuthed(false);
+  };
+
+  if (authed === null) {
     return (
       <main className="auth-screen">
         <section className="auth-card" aria-live="polite">
@@ -492,28 +610,57 @@ export default function App() {
     );
   }
 
-  if (authRequired) {
+  if (!authed) {
+    const isSignup = authMode === "signup";
     return (
       <main className="auth-screen">
-        <form className="auth-card" onSubmit={unlock}>
+        <form className="auth-card" onSubmit={submitAuth}>
           <div className="brand-mark">A</div>
           <span className="eyebrow">Agent Launchpad</span>
-          <h1>Enter the access token</h1>
-          <p>This shared demo token is configured by the platform operator.</p>
+          <h1>{isSignup ? "Create an account" : "Log in"}</h1>
           {error && <div className="error-banner" role="alert">{error}</div>}
           <label>
-            Access token
+            Username
             <input
               autoFocus
-              type="password"
-              value={authInput}
-              onChange={(event) => setAuthInput(event.target.value)}
-              autoComplete="current-password"
+              type="text"
+              value={loginUsername}
+              onChange={(event) => setLoginUsername(event.target.value)}
+              autoComplete="username"
               required
             />
           </label>
-          <button className="button button-primary" disabled={busy || !authInput.trim()}>
-            {busy ? <Spinner /> : "Open Launchpad"}
+          <label>
+            Password
+            <input
+              type="password"
+              value={loginPassword}
+              onChange={(event) => setLoginPassword(event.target.value)}
+              autoComplete={isSignup ? "new-password" : "current-password"}
+              minLength={isSignup ? 8 : undefined}
+              required
+            />
+          </label>
+          {isSignup && loginPassword.length > 0 && loginPassword.length < 8 && (
+            <p className="field-hint">Password must be at least 8 characters.</p>
+          )}
+          <button
+            className="button button-primary"
+            disabled={
+              busy || !loginUsername.trim() || !loginPassword || (isSignup && loginPassword.length < 8)
+            }
+          >
+            {busy ? <Spinner /> : isSignup ? "Sign up" : "Log in"}
+          </button>
+          <button
+            type="button"
+            className="button button-ghost"
+            onClick={() => {
+              setAuthMode(isSignup ? "login" : "signup");
+              setError(null);
+            }}
+          >
+            {isSignup ? "Already have an account? Log in" : "Need an account? Sign up"}
           </button>
         </form>
       </main>
@@ -643,6 +790,14 @@ export default function App() {
             {system?.containerEngine ? " · " + system.containerEngine : ""}
           </span>
         </div>
+
+        <div className="runtime-card">
+          <span className="eyebrow">Signed in as</span>
+          <strong>{currentUser?.username}</strong>
+          <button type="button" className="button button-ghost" onClick={() => void logout()}>
+            Log out
+          </button>
+        </div>
       </aside>
 
       <main className="main">
@@ -694,6 +849,13 @@ export default function App() {
                   disabled={busy}
                 >
                   {selected.status === "stopped" ? "Start" : "Stop"}
+                </button>
+                <button
+                  className="button button-ghost"
+                  onClick={() => void shareAgent()}
+                  disabled={busy}
+                >
+                  Share
                 </button>
                 <button
                   className="button button-danger"
@@ -908,13 +1070,15 @@ export default function App() {
                 >
                   Stop
                 </button>
-                <button
-                  className="button button-danger"
-                  onClick={deleteSelectedSession}
-                  disabled={busy || selectedSession.stage !== "idle"}
-                >
-                  Delete
-                </button>
+                {selectedSession.isOwner && (
+                  <button
+                    className="button button-danger"
+                    onClick={deleteSelectedSession}
+                    disabled={busy || selectedSession.stage !== "idle"}
+                  >
+                    Delete
+                  </button>
+                )}
               </div>
             </header>
 
@@ -923,9 +1087,25 @@ export default function App() {
                 <div className="settings-title">
                   <div>
                     <span className="eyebrow">Session roster</span>
-                    <h2>Only these Agents can be routed to</h2>
+                    <h2>Agents that can be routed to — anyone here can contribute their own</h2>
                   </div>
                   <button type="button" onClick={() => setShowSessionMembers(false)}>×</button>
+                </div>
+                <div className="form-grid">
+                  {selectedSession.members.map((member) => (
+                    <span key={member.id} className="member-checkbox">
+                      {member.name}
+                      {member.ownerId !== currentUser?.id && member.ownerUsername && (
+                        <span className="member-owner-tag">by {member.ownerUsername}</span>
+                      )}
+                    </span>
+                  ))}
+                  {selectedSession.members.length === 0 && <span>No Agents in this Session yet.</span>}
+                </div>
+                <div className="settings-title">
+                  <div>
+                    <h2>Add or remove one of your own Agents</h2>
+                  </div>
                 </div>
                 <div className="form-grid">
                   {agents.map((agent) => {
@@ -944,6 +1124,40 @@ export default function App() {
                   })}
                   {agents.length === 0 && <span>Create an Agent first.</span>}
                 </div>
+
+                {selectedSession.isOwner && (
+                  <>
+                    <div className="settings-title">
+                      <div>
+                        <span className="eyebrow">Collaborators</span>
+                        <h2>Users who can view and participate in this Session</h2>
+                      </div>
+                      <button
+                        type="button"
+                        className="button button-ghost"
+                        onClick={() => void addCollaborator()}
+                      >
+                        + Add
+                      </button>
+                    </div>
+                    <div className="form-grid">
+                      {selectedSession.collaborators.map((collaborator) => (
+                        <span key={collaborator.id} className="member-checkbox">
+                          {collaborator.username}
+                          <button
+                            type="button"
+                            className="button button-ghost"
+                            disabled={busy}
+                            onClick={() => void removeCollaborator(collaborator.username)}
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                      {selectedSession.collaborators.length === 0 && <span>No collaborators yet.</span>}
+                    </div>
+                  </>
+                )}
               </div>
             )}
 
@@ -954,7 +1168,7 @@ export default function App() {
                   <h2>
                     Delegates to:{" "}
                     {selectedSession.memberAgentIds
-                      .map((id) => agentDisplayName(agents, selectedSession, id))
+                      .map((id) => agentDisplayName(selectedSession, id))
                       .join(", ") || "no members yet"}
                   </h2>
                 </div>
@@ -985,12 +1199,26 @@ export default function App() {
                   </div>
                 ) : (
                   visibleSessionMessages.map((message) => (
-                    <article className={"message message-" + message.role} key={message.id}>
+                    <article
+                      className={
+                        "message message-" +
+                        message.role +
+                        (message.kind === "comment" ? " message-comment" : "")
+                      }
+                      key={message.id}
+                    >
                       <div className="message-meta">
-                        <strong>{partyLabel(agents, selectedSession, message.senderId)}</strong>
+                        <strong>
+                          {partyLabel(selectedSession, message.senderId, {
+                            senderUserId: message.senderUserId,
+                            senderUsername: message.senderUsername,
+                            currentUserId: currentUser?.id,
+                          })}
+                        </strong>
+                        {message.kind === "comment" && <span className="message-recipient">comment</span>}
                         {message.recipientId && message.recipientId !== message.senderId && (
                           <span className="message-recipient">
-                            → {partyLabel(agents, selectedSession, message.recipientId)}
+                            → {partyLabel(selectedSession, message.recipientId)}
                           </span>
                         )}
                         <span>{formatTime(message.createdAt)}</span>
@@ -1021,6 +1249,22 @@ export default function App() {
               </div>
 
               <form className="composer" onSubmit={sendSessionMessage}>
+                <div className="compose-mode-toggle">
+                  <button
+                    type="button"
+                    className={"button " + (composeMode === "task" ? "button-primary" : "button-ghost")}
+                    onClick={() => setComposeMode("task")}
+                  >
+                    Task
+                  </button>
+                  <button
+                    type="button"
+                    className={"button " + (composeMode === "comment" ? "button-primary" : "button-ghost")}
+                    onClick={() => setComposeMode("comment")}
+                  >
+                    Comment
+                  </button>
+                </div>
                 <textarea
                   value={sessionPrompt}
                   onChange={(event) => setSessionPrompt(event.target.value)}
@@ -1030,8 +1274,12 @@ export default function App() {
                       event.currentTarget.form?.requestSubmit();
                     }
                   }}
-                  placeholder="Describe what the Session should get done…"
-                  disabled={selectedSession.stage !== "idle"}
+                  placeholder={
+                    composeMode === "task"
+                      ? "Describe what the Session should get done…"
+                      : "Leave a note for your collaborators…"
+                  }
+                  disabled={composeMode === "task" && selectedSession.stage !== "idle"}
                   rows={3}
                 />
                 <div className="composer-footer">
@@ -1041,7 +1289,9 @@ export default function App() {
                   </span>
                   <button
                     className="send-button"
-                    disabled={!sessionPrompt.trim() || selectedSession.stage !== "idle"}
+                    disabled={
+                      !sessionPrompt.trim() || (composeMode === "task" && selectedSession.stage !== "idle")
+                    }
                     aria-label="Send message"
                   >
                     ↑

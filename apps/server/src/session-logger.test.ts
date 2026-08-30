@@ -32,7 +32,7 @@ async function readLines(logsDir: string, agentId: string): Promise<Record<strin
 describe("SessionLogger", () => {
   it("appends one JSONL entry per event into a single file for the session", async () => {
     const { logger, logsDir } = await makeLogger();
-    const context = { agentId: "agent-1", agentName: "Builder", runId: "run-1" };
+    const context = { agentId: "agent-1", agentName: "Builder", runId: "run-1", ownerId: "owner-1" };
 
     await logger.logUserMessage(context, "build a calculator");
     await logger.logToolCall(context, {
@@ -49,14 +49,19 @@ describe("SessionLogger", () => {
       "tool_call",
       "agent_response",
     ]);
-    expect(entries[0]).toMatchObject({ sessionId: "agent-1", agentName: "Builder", runId: "run-1" });
+    expect(entries[0]).toMatchObject({
+      sessionId: "agent-1",
+      agentName: "Builder",
+      runId: "run-1",
+      ownerId: "owner-1",
+    });
     expect(entries[1]).toMatchObject({ summary: "npm test" });
     expect(entries[2]).toMatchObject({ content: "Done." });
   });
 
   it("appends multiple runs from the same agent to the same session file", async () => {
     const { logger, logsDir } = await makeLogger();
-    const context = { agentId: "agent-2", agentName: "Builder", runId: "run-1" };
+    const context = { agentId: "agent-2", agentName: "Builder", runId: "run-1", ownerId: "owner-1" };
     await logger.logUserMessage(context, "first message");
     await logger.logUserMessage({ ...context, runId: "run-2" }, "second message");
 
@@ -67,7 +72,7 @@ describe("SessionLogger", () => {
 
   it("redacts bearer tokens and API-key-shaped strings before writing to disk", async () => {
     const { logger, logsDir } = await makeLogger();
-    const context = { agentId: "agent-3", agentName: "Builder", runId: "run-1" };
+    const context = { agentId: "agent-3", agentName: "Builder", runId: "run-1", ownerId: "owner-1" };
     await logger.logError(
       context,
       "Request failed with Authorization: Bearer abcdEFGH12345678ijklMNOPqrst",
@@ -80,7 +85,7 @@ describe("SessionLogger", () => {
 
   it("truncates oversized fields while keeping the line valid JSON", async () => {
     const { logger, logsDir } = await makeLogger();
-    const context = { agentId: "agent-4", agentName: "Builder", runId: "run-1" };
+    const context = { agentId: "agent-4", agentName: "Builder", runId: "run-1", ownerId: "owner-1" };
     await logger.logAgentResponse(context, "x".repeat(10_000), null);
 
     const entries = await readLines(logsDir, "agent-4");

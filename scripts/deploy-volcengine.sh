@@ -24,13 +24,12 @@ set -a
 source .env.production
 set +a
 
-if [[ "${OPENROUTER_API_KEY:-}" == "" || "${APP_AUTH_TOKEN:-}" == "" ]]; then
-  echo "OPENROUTER_API_KEY and APP_AUTH_TOKEN are required in .env.production." >&2
+if [[ "${OPENROUTER_API_KEY:-}" == "" ]]; then
+  echo "OPENROUTER_API_KEY is required in .env.production." >&2
   exit 1
 fi
 
 export TF_VAR_openrouter_api_key="$OPENROUTER_API_KEY"
-export TF_VAR_app_auth_token="$APP_AUTH_TOKEN"
 export TF_VAR_openrouter_model="${OPENROUTER_MODEL:-openrouter/free}"
 export TF_VAR_openrouter_base_url="${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}"
 

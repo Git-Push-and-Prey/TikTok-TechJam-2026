@@ -1,4 +1,4 @@
-import type { Agent, AgentRun, Message, Session, SystemInfo } from "./types";
+import type { Agent, AgentRun, Message, Session, SystemInfo, User } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -33,7 +33,18 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  auth: () => request<{ required: boolean }>("/api/auth"),
+  login: (username: string, password: string) =>
+    request<{ token: string; user: User }>("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    }),
+  register: (username: string, password: string) =>
+    request<{ token: string; user: User }>("/api/auth/register", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    }),
+  logout: () => request<void>("/api/auth/logout", { method: "POST" }),
+  me: () => request<{ user: User }>("/api/auth/me"),
   system: () => request<SystemInfo>("/api/system"),
   listAgents: () => request<{ agents: Agent[] }>("/api/agents"),
   createAgent: (body: {
@@ -56,6 +67,11 @@ export const api = {
   deleteAgent: (id: string) =>
     request<{ archivedWorkspace: string }>("/api/agents/" + id, {
       method: "DELETE",
+    }),
+  shareAgent: (id: string, username: string) =>
+    request<{ agent: Agent }>("/api/agents/" + id + "/share", {
+      method: "POST",
+      body: JSON.stringify({ username }),
     }),
   startAgent: (id: string) =>
     request<{ agent: Agent }>("/api/agents/" + id + "/start", {
@@ -90,15 +106,20 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
+  updateSessionCollaborators: (id: string, body: { add?: string[]; remove?: string[] }) =>
+    request<{ session: Session }>("/api/sessions/" + id + "/collaborators", {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
   deleteSession: (id: string) =>
     request<void>("/api/sessions/" + id, { method: "DELETE" }),
   stopSession: (id: string) =>
     request<{ session: Session }>("/api/sessions/" + id + "/stop", { method: "POST" }),
   sessionMessages: (id: string) =>
     request<{ messages: Message[] }>("/api/sessions/" + id + "/messages"),
-  sendSessionMessage: (id: string, content: string) =>
+  sendSessionMessage: (id: string, content: string, kind: "task" | "comment" = "task") =>
     request<{ message: Message }>("/api/sessions/" + id + "/messages", {
       method: "POST",
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({ content, kind }),
     }),
 };

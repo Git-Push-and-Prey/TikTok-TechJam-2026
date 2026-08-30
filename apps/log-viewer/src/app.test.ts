@@ -27,20 +27,28 @@ async function makeLogsDir(): Promise<string> {
 }
 
 describe("Log viewer HTTP boundary", () => {
-  it("lists and reads sessions without auth when no token is configured", async () => {
-    const logsDir = await makeLogsDir();
-    const app = await createApp(loadConfig({ NODE_ENV: "test", LOGS_DIR: logsDir }));
+  it(
+    "lists and reads sessions without auth when no token is configured",
+    async () => {
+      // Fastify app construction can take several seconds on a slow/cold
+      // machine (this is typically the first app built in the file) — the
+      // test logic itself is instant, so give it real headroom rather than
+      // relying on vitest's 5s default.
+      const logsDir = await makeLogsDir();
+      const app = await createApp(loadConfig({ NODE_ENV: "test", LOGS_DIR: logsDir }));
 
-    const list = await app.inject({ method: "GET", url: "/api/sessions" });
-    expect(list.statusCode).toBe(200);
-    expect(list.json().sessions).toHaveLength(1);
+      const list = await app.inject({ method: "GET", url: "/api/sessions" });
+      expect(list.statusCode).toBe(200);
+      expect(list.json().sessions).toHaveLength(1);
 
-    const detail = await app.inject({ method: "GET", url: "/api/sessions/agent-1" });
-    expect(detail.statusCode).toBe(200);
-    expect(detail.json().entries).toHaveLength(1);
+      const detail = await app.inject({ method: "GET", url: "/api/sessions/agent-1" });
+      expect(detail.statusCode).toBe(200);
+      expect(detail.json().entries).toHaveLength(1);
 
-    await app.close();
-  });
+      await app.close();
+    },
+    20_000,
+  );
 
   it("protects API routes with the configured shared token", async () => {
     const logsDir = await makeLogsDir();

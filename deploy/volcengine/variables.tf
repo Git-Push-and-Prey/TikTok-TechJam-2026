@@ -65,16 +65,6 @@ variable "openrouter_api_key" {
   sensitive   = true
 }
 
-variable "app_auth_token" {
-  description = "Shared browser/API demo token. Supplied through TF_VAR_app_auth_token."
-  type        = string
-  sensitive   = true
-  validation {
-    condition     = length(var.app_auth_token) >= 24 && length(var.app_auth_token) <= 128 && can(regex("^[A-Za-z0-9._~-]+$", var.app_auth_token)) && !startswith(var.app_auth_token, "replace-")
-    error_message = "app_auth_token must contain 24-128 URL-safe, non-placeholder characters."
-  }
-}
-
 variable "openrouter_model" {
   description = "OpenRouter model slug, for example openrouter/free."
   type        = string
