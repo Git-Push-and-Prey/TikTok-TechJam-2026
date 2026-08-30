@@ -26,6 +26,10 @@ export interface Agent {
   workspacePath: string;
   codexThreadId: string | null;
   lastError: string | null;
+
+  maxExecutionTimeoutMs: number;
+
+  maxExecutionSteps: number;
   /** The User that owns this Agent. Null for rows migrated before accounts existed. */
   ownerId: string | null;
   createdAt: string;
@@ -189,6 +193,9 @@ export interface CreateAgentInput {
   description?: string | undefined;
   instructions?: string | undefined;
   kind?: AgentKind | undefined;
+  maxExecutionSteps?: number | undefined;
+  maxExecutionTimeoutMs?: number | undefined;
+
 }
 
 export interface CreateSessionInput {
@@ -201,6 +208,8 @@ export interface UpdateAgentInput {
   name?: string | undefined;
   description?: string | undefined;
   instructions?: string | undefined;
+  maxExecutionSteps?: number | undefined;
+  maxExecutionTimeoutMs?: number | undefined;
 }
 
 export interface RunnerResult {

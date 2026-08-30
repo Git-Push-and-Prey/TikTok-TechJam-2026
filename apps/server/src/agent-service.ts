@@ -16,6 +16,7 @@ import type {
 } from "./types.js";
 import { USER_PARTY } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
+import { ExecutionGuardrail } from "./middleware/execution-guardrail.js";
 
 const now = () => new Date().toISOString();
 
@@ -102,6 +103,8 @@ export class AgentService extends EventEmitter {
       codexThreadId: null,
       lastError: null,
       ownerId,
+      maxExecutionSteps: input.maxExecutionSteps ?? 10,
+      maxExecutionTimeoutMs: input.maxExecutionTimeoutMs ?? 60_000,
       createdAt: timestamp,
       updatedAt: timestamp,
     };
@@ -136,25 +139,69 @@ export class AgentService extends EventEmitter {
     ownerId?: string | null,
   ): Promise<Agent> {
     const current = this.getAgent(id, ownerId);
+  
     if (current.status === "busy") {
       throw new HttpError(409, "Stop the active run before editing this Agent");
     }
+  
     const updated = await this.store.mutate((database) => {
       const agent = database.agents.find((item) => item.id === id);
+  
       if (!agent) {
         throw new HttpError(404, "Agent not found");
       }
+  
       if (agent.status === "busy") {
         throw new HttpError(409, "Stop the active run before editing this Agent");
       }
-      if (input.name !== undefined) agent.name = input.name.trim();
-      if (input.description !== undefined) agent.description = input.description.trim();
-      if (input.instructions !== undefined) agent.instructions = input.instructions.trim();
+  
+      if (input.name !== undefined) {
+        agent.name = input.name.trim();
+      }
+  
+      if (input.description !== undefined) {
+        agent.description = input.description.trim();
+      }
+  
+      if (input.instructions !== undefined) {
+        agent.instructions = input.instructions.trim();
+      }
+  
+      if (input.maxExecutionSteps !== undefined) {
+        if (
+          !Number.isInteger(input.maxExecutionSteps) ||
+          input.maxExecutionSteps <= 0
+        ) {
+          throw new HttpError(
+            400,
+            "maxExecutionSteps must be a positive integer",
+          );
+        }
+  
+        agent.maxExecutionSteps = input.maxExecutionSteps;
+      }
+      if (input.maxExecutionTimeoutMs !== undefined) {
+        if (
+          !Number.isInteger(input.maxExecutionTimeoutMs) ||
+          input.maxExecutionTimeoutMs <= 0
+        ) {
+          throw new HttpError(
+            400,
+            "maxExecutionTimeoutMs must be a positive integer",
+          );
+        }
+      
+        agent.maxExecutionTimeoutMs = input.maxExecutionTimeoutMs;
+      }
+  
       agent.lastError = null;
       agent.updatedAt = now();
+  
       return structuredClone(agent);
     });
+  
     await this.workspaces.writeInstructions(updated);
+  
     return updated;
   }
 
@@ -317,40 +364,104 @@ export class AgentService extends EventEmitter {
       runId: run.id,
       ownerId: agentAtStart.ownerId,
     };
+  
+    const executionGuardrail = new ExecutionGuardrail({
+      maxSteps: agentAtStart.maxExecutionSteps,
+      timeoutMs: agentAtStart.maxExecutionTimeoutMs,
+    });
+  
+    let guardrailTriggered = false;
+    let timeoutTriggered = false;
+  
+    const guardrailTimeout = executionGuardrail.createTimeout(() => {
+      timeoutTriggered = true;
+      void this.runner.cancel(agentAtStart.id);
+    });
+  
     await this.store.mutate((database) => {
       const storedRun = database.runs.find((item) => item.id === run.id);
+  
       if (storedRun) {
         storedRun.status = "running";
         storedRun.startedAt = now();
       }
     });
+  
     try {
       if (this.cancellationRequests.has(agentAtStart.id)) {
         throw new RunCancelledError();
       }
+  
       const result = await this.runner.run({
         agentId: agentAtStart.id,
-        workspacePath: options?.workspaceOverride ?? agentAtStart.workspacePath,
+        workspacePath:
+          options?.workspaceOverride ?? agentAtStart.workspacePath,
         prompt: run.prompt,
-        threadId: options?.session ? options.session.threadId : agentAtStart.codexThreadId,
+        threadId: options?.session
+          ? options.session.threadId
+          : agentAtStart.codexThreadId,
+  
         onEvent: (event) => {
           if (event.kind === "tool_call") {
+            const decision = executionGuardrail.check();
+  
+            if (!decision.allowed) {
+              guardrailTriggered = true;
+  
+              void this.runner.cancel(agentAtStart.id);
+  
+              return;
+            }
+  
             void this.sessionLogger.logToolCall(logContext, event);
           } else {
-            void this.sessionLogger.logError(logContext, event.message);
+            void this.sessionLogger.logError(
+              logContext,
+              event.message,
+            );
           }
         },
       });
-      void this.sessionLogger.logAgentResponse(logContext, result.output, result.usage);
+  
+      /*
+       * If the timeout fired but the runner happened to finish
+       * before cancellation was processed, the timeout still
+       * takes precedence over successful completion.
+       */
+      if (timeoutTriggered) {
+        throw new Error("Execution timeout exceeded");
+      }
+  
+      if (guardrailTriggered) {
+        throw new Error("Maximum execution steps exceeded");
+      }
+  
+      void this.sessionLogger.logAgentResponse(
+        logContext,
+        result.output,
+        result.usage,
+      );
+  
       const completedAt = now();
+  
       const finalRun = await this.store.mutate((database) => {
-        const storedRun = database.runs.find((item) => item.id === run.id);
-        const agent = database.agents.find((item) => item.id === agentAtStart.id);
-        if (!storedRun || !agent) return null;
+        const storedRun = database.runs.find(
+          (item) => item.id === run.id,
+        );
+  
+        const agent = database.agents.find(
+          (item) => item.id === agentAtStart.id,
+        );
+  
+        if (!storedRun || !agent) {
+          return null;
+        }
+  
         storedRun.status = "completed";
         storedRun.output = result.output;
         storedRun.usage = result.usage;
         storedRun.completedAt = completedAt;
+  
         database.messages.push({
           id: randomUUID(),
           agentId: agent.id,
@@ -359,46 +470,97 @@ export class AgentService extends EventEmitter {
           content: result.output,
           sessionId: run.sessionId,
           senderId: agent.id,
-          recipientId: options?.recipient ?? options?.sender ?? USER_PARTY,
+          recipientId:
+            options?.recipient ?? options?.sender ?? USER_PARTY,
           createdAt: completedAt,
         });
+  
         agent.status = "ready";
+  
         if (options?.session) {
           options.session.onThreadId(result.threadId);
         } else {
           agent.codexThreadId = result.threadId;
         }
+  
         agent.lastError = null;
         agent.updatedAt = completedAt;
+  
         return structuredClone(storedRun);
       });
-      if (finalRun) this.emit("run:settled", { agentId: agentAtStart.id, run: finalRun });
+  
+      if (finalRun) {
+        this.emit("run:settled", {
+          agentId: agentAtStart.id,
+          run: finalRun,
+        });
+      }
     } catch (error) {
       const completedAt = now();
-      const cancelled = error instanceof RunCancelledError;
-      const message = error instanceof Error ? error.message : String(error);
+  
+      const cancelled =
+        error instanceof RunCancelledError &&
+        !guardrailTriggered &&
+        !timeoutTriggered;
+  
+      const message = guardrailTriggered
+        ? `Execution guardrail triggered: Maximum execution steps exceeded (limit=${executionGuardrail.getMaxSteps()}, used=${executionGuardrail.getStepsUsed()})`
+        : timeoutTriggered
+          ? `Execution guardrail triggered: Execution timeout exceeded (timeoutMs=${executionGuardrail.getTimeoutMs()})`
+          : error instanceof Error
+            ? error.message
+            : String(error);
+  
       void this.sessionLogger.logError(
         logContext,
         cancelled ? "Run cancelled by user" : message,
       );
+  
       const finalRun = await this.store.mutate((database) => {
-        const storedRun = database.runs.find((item) => item.id === run.id);
-        const agent = database.agents.find((item) => item.id === agentAtStart.id);
+        const storedRun = database.runs.find(
+          (item) => item.id === run.id,
+        );
+  
+        const agent = database.agents.find(
+          (item) => item.id === agentAtStart.id,
+        );
+  
         if (storedRun) {
-          storedRun.status = cancelled ? "cancelled" : "failed";
+          storedRun.status = cancelled
+            ? "cancelled"
+            : "failed";
+  
           storedRun.error = message;
           storedRun.completedAt = completedAt;
         }
+  
         if (agent) {
           if (agent.status !== "stopped") {
-            agent.status = cancelled ? "ready" : "error";
+            agent.status = cancelled
+              ? "ready"
+              : "error";
           }
-          agent.lastError = cancelled ? null : message;
+  
+          agent.lastError = cancelled
+            ? null
+            : message;
+  
           agent.updatedAt = completedAt;
         }
-        return storedRun ? structuredClone(storedRun) : null;
+  
+        return storedRun
+          ? structuredClone(storedRun)
+          : null;
       });
-      if (finalRun) this.emit("run:settled", { agentId: agentAtStart.id, run: finalRun });
+  
+      if (finalRun) {
+        this.emit("run:settled", {
+          agentId: agentAtStart.id,
+          run: finalRun,
+        });
+      }
+    } finally {
+      clearTimeout(guardrailTimeout);
     }
   }
 
