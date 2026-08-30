@@ -91,6 +91,20 @@ describe("CredentialService", () => {
     expect(JSON.stringify(events)).not.toContain(issued.secret);
   });
 
+  it("revokes every credential when an Agent is removed", async () => {
+    const { agentId, service } = await makeCredentials();
+    const first = await service.createCredential(agentId);
+    const second = await service.createCredential(agentId);
+    await service.revokeAllForAgent(agentId, "Agent deleted");
+
+    await expect(service.verifyCredential(agentId, "AgentKey " + first.secret)).rejects
+      .toMatchObject({ statusCode: 401 });
+    await expect(service.verifyCredential(agentId, "AgentKey " + second.secret)).rejects
+      .toMatchObject({ statusCode: 401 });
+    expect(service.listCredentials(agentId).every((credential) => credential.status === "revoked"))
+      .toBe(true);
+  });
+
   it("authenticates AgentKey requests at the Fastify message boundary", async () => {
     const { agentId, service: credentials } = await makeCredentials();
     const issued = await credentials.createCredential(agentId);

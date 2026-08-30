@@ -53,6 +53,7 @@ export class CredentialService {
   }
 
   async rotateCredential(agentId: string, keyId: string): Promise<IssuedCredential> {
+    await this.expireCredentialIfNeeded(keyId);
     const timestamp = now();
     const overlapUntil = new Date(
       Date.now() + this.config.agentCredentialOverlapMs,
@@ -62,7 +63,7 @@ export class CredentialService {
         (item) => item.agentId === agentId && item.keyId === keyId,
       );
       if (!credential) throw new HttpError(404, "Credential not found");
-      if (credential.status === "revoked" || credential.status === "expired") {
+      if (credential.status !== "active") {
         throw new HttpError(409, "Only an active credential can be rotated");
       }
       credential.status = "rotating";
