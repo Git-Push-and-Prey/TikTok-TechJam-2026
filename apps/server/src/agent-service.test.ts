@@ -8,6 +8,7 @@ import { SessionLogger } from "./session-logger.js";
 import { JsonStore } from "./store.js";
 import type { AgentRunner, RunnerRequest, RunnerResult } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
+import { RunCancelledError } from "./errors.js";
 
 class FakeRunner implements AgentRunner {
   async run(request: RunnerRequest): Promise<RunnerResult> {
@@ -20,6 +21,62 @@ class FakeRunner implements AgentRunner {
   async cancel(): Promise<boolean> {
     return false;
   }
+  async isAvailable(): Promise<boolean> {
+    return true;
+  }
+}class GuardrailTestRunner implements AgentRunner {
+  cancelCalled = false;
+
+  async run(request: RunnerRequest): Promise<RunnerResult> {
+    for (let i = 0; i < 11; i += 1) {
+      request.onEvent?.({
+        kind: "tool_call",
+        itemType: "test_tool",
+        status: "completed",
+        summary: `Test tool call ${i + 1}`,
+        detail: {
+          step: i + 1,
+        },
+      });
+    }
+
+    // Wait for AgentService to react to the guardrail
+    // and call cancel().
+    while (!this.cancelCalled) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+
+    throw new RunCancelledError();
+  }
+
+  async cancel(): Promise<boolean> {
+    this.cancelCalled = true;
+    return true;
+  }
+
+  async isAvailable(): Promise<boolean> {
+    return true;
+  }
+}
+
+class TimeoutTestRunner implements AgentRunner {
+  cancelCalled = false;
+
+  async run(): Promise<RunnerResult> {
+    // Simulate an Agent that never finishes.
+    while (!this.cancelCalled) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+
+    // Simulate the Runner reporting cancellation.
+    throw new RunCancelledError();
+  }
+
+  async cancel(): Promise<boolean> {
+    this.cancelCalled = true;
+    return true;
+  }
+
   async isAvailable(): Promise<boolean> {
     return true;
   }
@@ -160,6 +217,124 @@ describe("Agent lifecycle", () => {
 
     finish({ output: "done", threadId: "thread", usage: null });
     await expect.poll(() => service.getRun(run.id, OWNER).status).toBe("completed");
+  });
+  it("stops execution when the maximum step guardrail is exceeded", async () => {
+    const runner = new GuardrailTestRunner();
+    const service = await makeService(runner);
+
+    const agent = await service.createAgent(
+      { name: "Guardrail Agent" },
+      OWNER,
+    );
+
+    const { run } = await service.sendMessage(
+      agent.id,
+      "run a task that exceeds the step limit",
+      OWNER,
+    );
+
+    await expect.poll(() => runner.cancelCalled).toBe(true);
+
+    await expect.poll(() => service.getRun(run.id, OWNER).status).toBe("failed");
+
+    const finalRun = service.getRun(run.id, OWNER);
+
+    expect(finalRun.error).toContain(
+      "Execution guardrail triggered",
+    );
+
+    expect(finalRun.error).toContain(
+      "limit=10",
+    );
+
+    expect(finalRun.error).toContain(
+      "used=10",
+    );
+  });
+  it("updates the execution step limit", async () => {
+    const service = await makeService();
+  
+    const agent = await service.createAgent(
+      {
+        name: "Configurable Agent",
+      },
+      OWNER,
+    );
+  
+    expect(agent.maxExecutionSteps).toBe(10);
+  
+    const updated = await service.updateAgent(
+      agent.id,
+      {
+        maxExecutionSteps: 25,
+      },
+      OWNER,
+    );
+  
+    expect(updated.maxExecutionSteps).toBe(25);
+  
+    const fetched = service.getAgent(agent.id, OWNER);
+  
+    expect(fetched.maxExecutionSteps).toBe(25);
+  });
+  it("rejects an invalid execution step limit", async () => {
+    const service = await makeService();
+  
+    const agent = await service.createAgent(
+      {
+        name: "Configurable Agent",
+      },
+      OWNER,
+    );
+  
+    await expect(
+      service.updateAgent(
+        agent.id,
+        {
+          maxExecutionSteps: 0,
+        },
+        OWNER,
+      ),
+    ).rejects.toThrow("maxExecutionSteps must be a positive integer");
+  });
+  it("stops execution when the maximum execution timeout is exceeded", async () => {
+    const runner = new TimeoutTestRunner();
+    const service = await makeService(runner);
+  
+    const agent = await service.createAgent(
+      {
+        name: "Timeout Agent",
+        maxExecutionSteps: 10,
+        maxExecutionTimeoutMs: 20,
+      },
+      OWNER,
+    );
+  
+    const { run } = await service.sendMessage(
+      agent.id,
+      "run a task that never finishes",
+      OWNER,
+    );
+  
+    await expect.poll(() => runner.cancelCalled).toBe(true);
+  
+    await expect
+      .poll(() => service.getRun(run.id, OWNER).status)
+      .toBe("failed");
+  
+    const finalRun = service.getRun(run.id, OWNER);
+  
+    expect(finalRun.error).toContain(
+      "Execution guardrail triggered",
+    );
+  
+    expect(finalRun.error).toContain(
+      "Execution timeout exceeded",
+    );
+  
+    expect(finalRun.error).toContain(
+      "timeoutMs=20",
+    );
   });
 });
 
