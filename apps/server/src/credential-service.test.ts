@@ -5,7 +5,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { CredentialService } from "./credential-service.js";
 import { createApp } from "./app.js";
 import type { AgentService } from "./agent-service.js";
+import type { AuthService } from "./auth.js";
 import { loadConfig } from "./config.js";
+import type { SessionEngine } from "./session-engine.js";
 import { JsonStore } from "./store.js";
 
 const temporaryDirectories: string[] = [];
@@ -30,9 +32,11 @@ async function makeCredentials(overlap = 300_000) {
       description: "",
       instructions: "",
       status: "ready",
+      kind: "user",
       workspacePath: path.join(root, "workspace"),
       codexThreadId: null,
       lastError: null,
+      ownerId: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
@@ -109,13 +113,19 @@ describe("CredentialService", () => {
     const { agentId, service: credentials } = await makeCredentials();
     const issued = await credentials.createCredential(agentId);
     const sendMessage = async () => ({ run: {}, message: {} });
+    const sessions = { listSessions: () => [] } as unknown as SessionEngine;
+    const auth = {
+      resolveToken: async () => null,
+      getUserById: () => null,
+    } as unknown as AuthService;
     const app = await createApp(
       loadConfig({
         NODE_ENV: "test",
-        APP_AUTH_TOKEN: "shared-demo-token",
         AGENT_CREDENTIAL_MASTER_KEY: Buffer.alloc(32, 7).toString("base64"),
       }),
       { sendMessage } as unknown as AgentService,
+      sessions,
+      auth,
       credentials,
     );
     const allowed = await app.inject({

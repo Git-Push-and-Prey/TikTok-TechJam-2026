@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, setAuthToken } from "./api";
-import type { Agent, AgentRun, Message, SystemInfo } from "./types";
+import { SYSTEM_PARTY, USER_PARTY } from "./types";
+import type { Agent, AgentRun, Message, Session, SessionStage, SystemInfo, User } from "./types";
+
+const AUTH_TOKEN_STORAGE_KEY = "launchpad.authToken";
 
 const starterPrompts = [
   "Create a small TypeScript CLI that prints a weather summary from sample JSON.",
@@ -15,11 +18,50 @@ const emptyForm = {
     "Help me build and test software in this workspace. Keep changes small and explain the result.",
 };
 
+const emptySessionForm = {
+  name: "",
+  description: "",
+  memberAgentIds: [] as string[],
+};
+
 function formatTime(value: string): string {
   return new Intl.DateTimeFormat(undefined, {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(value));
+}
+
+function sessionStatusClass(stage: SessionStage): "ready" | "busy" | "error" {
+  if (stage === "idle") return "ready";
+  if (stage === "failed") return "error";
+  return "busy";
+}
+
+/** Uses the Session's own denormalized roster (`session.members`), not the viewer's own Agent list — a collaborator can see roster Agent names even for Agents they don't own. */
+function agentDisplayName(session: Session, agentId: string): string {
+  if (agentId === session.orchestratorAgentId) return "Orchestrator";
+  return session.members.find((member) => member.id === agentId)?.name ?? "Unknown Agent";
+}
+
+/** A message belongs in the default (non-detail) view iff the user is a party to it — sender or recipient. Rows written before senderId/recipientId existed default to visible. */
+function isUserFacing(message: Message): boolean {
+  if (message.senderId === undefined && message.recipientId === undefined) return true;
+  return message.senderId === USER_PARTY || message.recipientId === USER_PARTY;
+}
+
+function partyLabel(
+  session: Session,
+  partyId: string | undefined,
+  sender?: { senderUserId?: string; senderUsername?: string; currentUserId?: string },
+): string {
+  if (!partyId || partyId === USER_PARTY) {
+    if (sender?.senderUsername && sender.senderUserId !== sender.currentUserId) {
+      return sender.senderUsername;
+    }
+    return "You";
+  }
+  if (partyId === SYSTEM_PARTY) return "System";
+  return agentDisplayName(session, partyId);
 }
 
 function StatusPill({ status }: { status: Agent["status"] }) {
@@ -47,17 +89,44 @@ export default function App() {
   const [activeRun, setActiveRun] = useState<AgentRun | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [authRequired, setAuthRequired] = useState<boolean | null>(null);
-  const [authInput, setAuthInput] = useState("");
+  const [authed, setAuthed] = useState<boolean | null>(null);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [authMode, setAuthMode] = useState<"login" | "signup">("login");
+  const [loginUsername, setLoginUsername] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [view, setView] = useState<"playground" | "sessions">("playground");
+  const [sessionsList, setSessionsList] = useState<Session[]>([]);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [sessionMessages, setSessionMessages] = useState<Message[]>([]);
+  const [showCreateSession, setShowCreateSession] = useState(false);
+  const [showSessionMembers, setShowSessionMembers] = useState(false);
+  const [showSessionDetails, setShowSessionDetails] = useState(false);
+  const [sessionForm, setSessionForm] = useState(emptySessionForm);
+  const [sessionPrompt, setSessionPrompt] = useState("");
+  const [composeMode, setComposeMode] = useState<"task" | "comment">("task");
   const messageEnd = useRef<HTMLDivElement>(null);
+  const sessionMessageEnd = useRef<HTMLDivElement>(null);
   const selectedIdRef = useRef<string | null>(null);
+  const selectedSessionIdRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
   const pollingRunIds = useRef(new Set<string>());
+  const pollingSessionIds = useRef(new Set<string>());
   selectedIdRef.current = selectedId;
+  selectedSessionIdRef.current = selectedSessionId;
 
   const selected = useMemo(
     () => agents.find((agent) => agent.id === selectedId) ?? null,
     [agents, selectedId],
+  );
+
+  const selectedSession = useMemo(
+    () => sessionsList.find((item) => item.id === selectedSessionId) ?? null,
+    [sessionsList, selectedSessionId],
+  );
+
+  const visibleSessionMessages = useMemo(
+    () => sessionMessages.filter((message) => showSessionDetails || isUserFacing(message)),
+    [sessionMessages, showSessionDetails],
   );
 
   const refreshAgents = useCallback(async () => {
@@ -77,20 +146,57 @@ export default function App() {
     }
   }, []);
 
+  const refreshSessions = useCallback(async () => {
+    const { sessions: next } = await api.listSessions();
+    setSessionsList(next);
+    setSelectedSessionId((current) =>
+      current && next.some((item) => item.id === current) ? current : (next[0]?.id ?? null),
+    );
+  }, []);
+
+  const refreshSessionMessages = useCallback(async (sessionId: string) => {
+    const result = await api.sessionMessages(sessionId);
+    if (mountedRef.current && selectedSessionIdRef.current === sessionId) {
+      // Continuous polling re-fetches even when nothing changed — keep the
+      // same array reference in that case so the auto-scroll effect (which
+      // runs on every `sessionMessages` change) doesn't fire for a no-op poll.
+      setSessionMessages((current) =>
+        current.length === result.messages.length &&
+        JSON.stringify(current) === JSON.stringify(result.messages)
+          ? current
+          : result.messages,
+      );
+    }
+  }, []);
+
   const bootstrap = useCallback(async () => {
     await Promise.all([refreshAgents(), api.system().then(setSystem)]);
   }, [refreshAgents]);
 
   useEffect(() => {
     mountedRef.current = true;
+    const stored = localStorage.getItem(AUTH_TOKEN_STORAGE_KEY);
+    if (!stored) {
+      setAuthed(false);
+      return () => {
+        mountedRef.current = false;
+      };
+    }
+    setAuthToken(stored);
     void api
-      .auth()
-      .then(async ({ required }) => {
+      .me()
+      .then(async ({ user }) => {
         if (!mountedRef.current) return;
-        setAuthRequired(required);
-        if (!required) await bootstrap();
+        setCurrentUser(user);
+        setAuthed(true);
+        await bootstrap();
       })
-      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+      .catch(() => {
+        if (!mountedRef.current) return;
+        localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+        setAuthToken("");
+        setAuthed(false);
+      });
     return () => {
       mountedRef.current = false;
     };
@@ -132,6 +238,63 @@ export default function App() {
   useEffect(() => {
     messageEnd.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, activeRun]);
+
+  useEffect(() => {
+    sessionMessageEnd.current?.scrollIntoView({ behavior: "smooth" });
+  }, [sessionMessages]);
+
+  useEffect(() => {
+    if (view === "sessions" && authed === true) {
+      void refreshSessions().catch((reason) =>
+        setError(reason instanceof Error ? reason.message : String(reason)),
+      );
+    }
+  }, [view, authed, refreshSessions]);
+
+  /**
+   * Keeps polling a selected Session's transcript/status for as long as it stays
+   * selected — not just while it's actively working — so a collaborator looking
+   * at an already-idle Session still sees someone else's new message appear.
+   * Polls faster while the orchestrator is busy, gentler while idle.
+   */
+  const pollSessionStage = useCallback(
+    async (sessionId: string) => {
+      if (pollingSessionIds.current.has(sessionId)) return;
+      pollingSessionIds.current.add(sessionId);
+      try {
+        while (mountedRef.current && selectedSessionIdRef.current === sessionId) {
+          const { session } = await api.getSession(sessionId);
+          if (!mountedRef.current || selectedSessionIdRef.current !== sessionId) return;
+          setSessionsList((current) =>
+            current.map((item) => (item.id === session.id ? session : item)),
+          );
+          await refreshSessionMessages(sessionId);
+          const delay = session.stage === "idle" || session.stage === "failed" ? 3000 : 900;
+          await new Promise((resolve) => window.setTimeout(resolve, delay));
+        }
+      } finally {
+        pollingSessionIds.current.delete(sessionId);
+      }
+    },
+    [refreshSessionMessages],
+  );
+
+  useEffect(() => {
+    if (!selectedSessionId) {
+      setSessionMessages([]);
+      return;
+    }
+    const sessionId = selectedSessionId;
+    void Promise.all([refreshSessionMessages(sessionId), api.getSession(sessionId)])
+      .then(([, result]) => {
+        if (selectedSessionIdRef.current !== sessionId) return;
+        setSessionsList((current) =>
+          current.map((item) => (item.id === result.session.id ? result.session : item)),
+        );
+        void pollSessionStage(sessionId);
+      })
+      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+  }, [selectedSessionId, refreshSessionMessages, pollSessionStage]);
 
   const createAgent = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -201,6 +364,24 @@ export default function App() {
     }
   };
 
+  const shareAgent = async () => {
+    if (!selected) return;
+    const username = window.prompt(
+      "Share a clone of \"" + selected.name + "\" with which username?",
+    );
+    if (!username?.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.shareAgent(selected.id, username.trim());
+      window.alert("Shared a clone of \"" + selected.name + "\" with " + username.trim() + ".");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const pollRun = async (runId: string, agentId: string) => {
     if (pollingRunIds.current.has(runId)) return;
     pollingRunIds.current.add(runId);
@@ -245,18 +426,159 @@ export default function App() {
     }
   };
 
-  const unlock = async (event: React.FormEvent) => {
+  const createSession = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (sessionForm.memberAgentIds.length === 0) {
+      setError("Pick at least one member Agent for this Session.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const { session } = await api.createSession(sessionForm);
+      await refreshSessions();
+      setSelectedSessionId(session.id);
+      setShowCreateSession(false);
+      setSessionForm(emptySessionForm);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleSessionMember = async (agentId: string, isMember: boolean) => {
+    if (!selectedSession) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const { session } = await api.updateSessionMembers(
+        selectedSession.id,
+        isMember ? { remove: [agentId] } : { add: [agentId] },
+      );
+      setSessionsList((current) => current.map((item) => (item.id === session.id ? session : item)));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const addCollaborator = async () => {
+    if (!selectedSession) return;
+    const username = window.prompt("Add which username as a collaborator on this Session?");
+    if (!username?.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const { session } = await api.updateSessionCollaborators(selectedSession.id, {
+        add: [username.trim()],
+      });
+      setSessionsList((current) => current.map((item) => (item.id === session.id ? session : item)));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeCollaborator = async (username: string) => {
+    if (!selectedSession) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const { session } = await api.updateSessionCollaborators(selectedSession.id, {
+        remove: [username],
+      });
+      setSessionsList((current) => current.map((item) => (item.id === session.id ? session : item)));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const stopSelectedSession = async () => {
+    if (!selectedSession) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.stopSession(selectedSession.id);
+      await refreshSessions();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteSelectedSession = async () => {
+    if (!selectedSession) return;
+    if (!window.confirm("Delete " + selectedSession.name + "? Its shared workspace will be archived.")) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await api.deleteSession(selectedSession.id);
+      setSelectedSessionId(null);
+      await refreshSessions();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const sendSessionMessage = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!selectedSession || !sessionPrompt.trim()) return;
+    const content = sessionPrompt.trim();
+    const mode = composeMode;
+    setSessionPrompt("");
+    setError(null);
+    try {
+      const result = await api.sendSessionMessage(selectedSession.id, content, mode);
+      if (selectedSessionIdRef.current === selectedSession.id) {
+        setSessionMessages((current) => [...current, result.message]);
+      }
+      if (mode === "task") {
+        setSessionsList((current) =>
+          current.map((item) =>
+            item.id === selectedSession.id ? { ...item, stage: "decomposing" } : item,
+          ),
+        );
+        await pollSessionStage(selectedSession.id);
+      }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+      await refreshSessions();
+    }
+  };
+
+  const submitAuth = async (event: React.FormEvent) => {
     event.preventDefault();
     setBusy(true);
     setError(null);
-    setAuthToken(authInput);
     try {
+      const { token, user } =
+        authMode === "login"
+          ? await api.login(loginUsername, loginPassword)
+          : await api.register(loginUsername, loginPassword);
+      localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
+      setAuthToken(token);
       await bootstrap();
-      setAuthRequired(false);
-      setAuthInput("");
+      setCurrentUser(user);
+      setAuthed(true);
+      setLoginUsername("");
+      setLoginPassword("");
     } catch (reason) {
       if (reason instanceof ApiError && reason.status === 401) {
-        setError("The access token is not valid.");
+        setError("That username or password is not valid.");
+      } else if (reason instanceof ApiError && reason.status === 409) {
+        setError("That username is already taken.");
+      } else if (reason instanceof ApiError && reason.status === 400) {
+        setError(reason.message);
       } else {
         setError(reason instanceof Error ? reason.message : String(reason));
       }
@@ -265,7 +587,17 @@ export default function App() {
     }
   };
 
-  if (authRequired === null) {
+  const logout = async () => {
+    await api.logout().catch(() => undefined);
+    localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+    setAuthToken("");
+    setCurrentUser(null);
+    setAgents([]);
+    setSessionsList([]);
+    setAuthed(false);
+  };
+
+  if (authed === null) {
     return (
       <main className="auth-screen">
         <section className="auth-card" aria-live="polite">
@@ -278,28 +610,57 @@ export default function App() {
     );
   }
 
-  if (authRequired) {
+  if (!authed) {
+    const isSignup = authMode === "signup";
     return (
       <main className="auth-screen">
-        <form className="auth-card" onSubmit={unlock}>
+        <form className="auth-card" onSubmit={submitAuth}>
           <div className="brand-mark">A</div>
           <span className="eyebrow">Agent Launchpad</span>
-          <h1>Enter the access token</h1>
-          <p>This shared demo token is configured by the platform operator.</p>
+          <h1>{isSignup ? "Create an account" : "Log in"}</h1>
           {error && <div className="error-banner" role="alert">{error}</div>}
           <label>
-            Access token
+            Username
             <input
               autoFocus
-              type="password"
-              value={authInput}
-              onChange={(event) => setAuthInput(event.target.value)}
-              autoComplete="current-password"
+              type="text"
+              value={loginUsername}
+              onChange={(event) => setLoginUsername(event.target.value)}
+              autoComplete="username"
               required
             />
           </label>
-          <button className="button button-primary" disabled={busy || !authInput.trim()}>
-            {busy ? <Spinner /> : "Open Launchpad"}
+          <label>
+            Password
+            <input
+              type="password"
+              value={loginPassword}
+              onChange={(event) => setLoginPassword(event.target.value)}
+              autoComplete={isSignup ? "new-password" : "current-password"}
+              minLength={isSignup ? 8 : undefined}
+              required
+            />
+          </label>
+          {isSignup && loginPassword.length > 0 && loginPassword.length < 8 && (
+            <p className="field-hint">Password must be at least 8 characters.</p>
+          )}
+          <button
+            className="button button-primary"
+            disabled={
+              busy || !loginUsername.trim() || !loginPassword || (isSignup && loginPassword.length < 8)
+            }
+          >
+            {busy ? <Spinner /> : isSignup ? "Sign up" : "Log in"}
+          </button>
+          <button
+            type="button"
+            className="button button-ghost"
+            onClick={() => {
+              setAuthMode(isSignup ? "login" : "signup");
+              setError(null);
+            }}
+          >
+            {isSignup ? "Already have an account? Log in" : "Need an account? Sign up"}
           </button>
         </form>
       </main>
@@ -321,62 +682,133 @@ export default function App() {
           </div>
         </div>
 
-        <button
-          className="button button-primary create-button"
-          onClick={() => {
-            setForm(emptyForm);
-            setShowCreate(true);
-          }}
-        >
-          <span>＋</span> Create Agent
-        </button>
-
-        <div className="sidebar-label">
-          <span>Your Agents</span>
-          <span>{agents.length}</span>
+        <div className="view-toggle">
+          <button
+            type="button"
+            className={"button " + (view === "playground" ? "button-primary" : "button-ghost")}
+            onClick={() => setView("playground")}
+          >
+            Playground
+          </button>
+          <button
+            type="button"
+            className={"button " + (view === "sessions" ? "button-primary" : "button-ghost")}
+            onClick={() => setView("sessions")}
+          >
+            Sessions
+          </button>
         </div>
-        <nav className="agent-list">
-          {agents.map((agent) => (
+
+        {view === "playground" ? (
+          <>
             <button
-              className={"agent-card " + (agent.id === selectedId ? "selected" : "")}
-              key={agent.id}
-              onClick={() => setSelectedId(agent.id)}
+              className="button button-primary create-button"
+              onClick={() => {
+                setForm(emptyForm);
+                setShowCreate(true);
+              }}
             >
-              <div className="agent-avatar">{agent.name.slice(0, 1).toUpperCase()}</div>
-              <div className="agent-card-copy">
-                <strong>{agent.name}</strong>
-                <span>{agent.description || "Coding Agent"}</span>
-              </div>
-              <span className={"mini-dot mini-" + agent.status} />
+              <span>＋</span> Create Agent
             </button>
-          ))}
-          {agents.length === 0 && (
-            <div className="empty-sidebar">
-              <span>◇</span>
-              Create your first coding Agent.
+
+            <div className="sidebar-label">
+              <span>Your Agents</span>
+              <span>{agents.length}</span>
             </div>
-          )}
-        </nav>
+            <nav className="agent-list">
+              {agents.map((agent) => (
+                <button
+                  className={"agent-card " + (agent.id === selectedId ? "selected" : "")}
+                  key={agent.id}
+                  onClick={() => setSelectedId(agent.id)}
+                >
+                  <div className="agent-avatar">{agent.name.slice(0, 1).toUpperCase()}</div>
+                  <div className="agent-card-copy">
+                    <strong>{agent.name}</strong>
+                    <span>{agent.description || "Coding Agent"}</span>
+                  </div>
+                  <span className={"mini-dot mini-" + agent.status} />
+                </button>
+              ))}
+              {agents.length === 0 && (
+                <div className="empty-sidebar">
+                  <span>◇</span>
+                  Create your first coding Agent.
+                </div>
+              )}
+            </nav>
+          </>
+        ) : (
+          <>
+            <button
+              className="button button-primary create-button"
+              onClick={() => {
+                setSessionForm(emptySessionForm);
+                setShowCreateSession(true);
+              }}
+            >
+              <span>＋</span> Create Session
+            </button>
+
+            <div className="sidebar-label">
+              <span>Sessions</span>
+              <span>{sessionsList.length}</span>
+            </div>
+            <nav className="agent-list">
+              {sessionsList.map((sessionItem) => (
+                <button
+                  className={"agent-card " + (sessionItem.id === selectedSessionId ? "selected" : "")}
+                  key={sessionItem.id}
+                  onClick={() => setSelectedSessionId(sessionItem.id)}
+                >
+                  <div className="agent-avatar">{sessionItem.name.slice(0, 1).toUpperCase()}</div>
+                  <div className="agent-card-copy">
+                    <strong>{sessionItem.name}</strong>
+                    <span>
+                      {sessionItem.memberAgentIds.length} member
+                      {sessionItem.memberAgentIds.length === 1 ? "" : "s"}
+                    </span>
+                  </div>
+                  <span className={"mini-dot mini-" + sessionStatusClass(sessionItem.stage)} />
+                </button>
+              ))}
+              {sessionsList.length === 0 && (
+                <div className="empty-sidebar">
+                  <span>◇</span>
+                  Create your first multi-agent Session.
+                </div>
+              )}
+            </nav>
+          </>
+        )}
 
         <div className="runtime-card">
           <span className="eyebrow">Runtime</span>
           <strong>{system?.runtime ?? "Checking…"}</strong>
           <span>
-            {system?.arkModel ?? "Ark model not configured"}
+            {system?.openrouterModel ?? "OpenRouter model not configured"}
             {system?.containerEngine ? " · " + system.containerEngine : ""}
           </span>
+        </div>
+
+        <div className="runtime-card">
+          <span className="eyebrow">Signed in as</span>
+          <strong>{currentUser?.username}</strong>
+          <button type="button" className="button button-ghost" onClick={() => void logout()}>
+            Log out
+          </button>
         </div>
       </aside>
 
       <main className="main">
-        {!system?.arkConfigured || !system?.codexAvailable ? (
+        {!system?.openrouterConfigured || !system?.codexAvailable ? (
           <div className="config-banner">
             <span>!</span>
             <div>
               <strong>Runtime configuration needed</strong>
               <p>
-                {!system?.arkConfigured
-                  ? "Set ARK_API_KEY and ARK_MODEL in .env before using the Playground."
+                {!system?.openrouterConfigured
+                  ? "Set OPENROUTER_API_KEY in .env before using the Playground."
                   : system.runtimeProvider === "container"
                     ? "The local container engine or Agent Runtime image is unavailable. Rerun npm run poc."
                     : "Codex CLI was not found. Use the Docker image or install @openai/codex."}
@@ -392,7 +824,8 @@ export default function App() {
           </div>
         )}
 
-        {selected ? (
+        {view === "playground" ? (
+        selected ? (
           <>
             <header className="agent-header">
               <div>
@@ -416,6 +849,13 @@ export default function App() {
                   disabled={busy}
                 >
                   {selected.status === "stopped" ? "Start" : "Stop"}
+                </button>
+                <button
+                  className="button button-ghost"
+                  onClick={() => void shareAgent()}
+                  disabled={busy}
+                >
+                  Share
                 </button>
                 <button
                   className="button button-danger"
@@ -599,6 +1039,286 @@ export default function App() {
               Create your first Agent
             </button>
           </div>
+        )
+        ) : selectedSession ? (
+          <>
+            <header className="agent-header">
+              <div>
+                <div className="header-title-row">
+                  <h1>{selectedSession.name}</h1>
+                  <span className={"status status-" + sessionStatusClass(selectedSession.stage)}>
+                    <span className="status-dot" />
+                    {selectedSession.stage}
+                  </span>
+                </div>
+                <p>
+                  {selectedSession.description ||
+                    "A multi-agent Session routed by a lightweight orchestrator."}
+                </p>
+              </div>
+              <div className="header-actions">
+                <button
+                  className="button button-ghost"
+                  onClick={() => setShowSessionMembers((value) => !value)}
+                >
+                  Members
+                </button>
+                <button
+                  className="button button-ghost"
+                  onClick={stopSelectedSession}
+                  disabled={busy || selectedSession.stage === "idle"}
+                >
+                  Stop
+                </button>
+                {selectedSession.isOwner && (
+                  <button
+                    className="button button-danger"
+                    onClick={deleteSelectedSession}
+                    disabled={busy || selectedSession.stage !== "idle"}
+                  >
+                    Delete
+                  </button>
+                )}
+              </div>
+            </header>
+
+            {showSessionMembers && (
+              <div className="settings-panel">
+                <div className="settings-title">
+                  <div>
+                    <span className="eyebrow">Session roster</span>
+                    <h2>Agents that can be routed to — anyone here can contribute their own</h2>
+                  </div>
+                  <button type="button" onClick={() => setShowSessionMembers(false)}>×</button>
+                </div>
+                <div className="form-grid">
+                  {selectedSession.members.map((member) => (
+                    <span key={member.id} className="member-checkbox">
+                      {member.name}
+                      {member.ownerId !== currentUser?.id && member.ownerUsername && (
+                        <span className="member-owner-tag">by {member.ownerUsername}</span>
+                      )}
+                    </span>
+                  ))}
+                  {selectedSession.members.length === 0 && <span>No Agents in this Session yet.</span>}
+                </div>
+                <div className="settings-title">
+                  <div>
+                    <h2>Add or remove one of your own Agents</h2>
+                  </div>
+                </div>
+                <div className="form-grid">
+                  {agents.map((agent) => {
+                    const isMember = selectedSession.memberAgentIds.includes(agent.id);
+                    return (
+                      <label key={agent.id} className="member-checkbox">
+                        <input
+                          type="checkbox"
+                          checked={isMember}
+                          disabled={busy}
+                          onChange={() => toggleSessionMember(agent.id, isMember)}
+                        />
+                        {agent.name}
+                      </label>
+                    );
+                  })}
+                  {agents.length === 0 && <span>Create an Agent first.</span>}
+                </div>
+
+                {selectedSession.isOwner && (
+                  <>
+                    <div className="settings-title">
+                      <div>
+                        <span className="eyebrow">Collaborators</span>
+                        <h2>Users who can view and participate in this Session</h2>
+                      </div>
+                      <button
+                        type="button"
+                        className="button button-ghost"
+                        onClick={() => void addCollaborator()}
+                      >
+                        + Add
+                      </button>
+                    </div>
+                    <div className="form-grid">
+                      {selectedSession.collaborators.map((collaborator) => (
+                        <span key={collaborator.id} className="member-checkbox">
+                          {collaborator.username}
+                          <button
+                            type="button"
+                            className="button button-ghost"
+                            disabled={busy}
+                            onClick={() => void removeCollaborator(collaborator.username)}
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                      {selectedSession.collaborators.length === 0 && <span>No collaborators yet.</span>}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
+            <section className="playground">
+              <div className="playground-topbar">
+                <div>
+                  <span className="eyebrow">Session</span>
+                  <h2>
+                    Delegates to:{" "}
+                    {selectedSession.memberAgentIds
+                      .map((id) => agentDisplayName(selectedSession, id))
+                      .join(", ") || "no members yet"}
+                  </h2>
+                </div>
+                <div className="session-info">
+                  <button
+                    type="button"
+                    className="details-toggle"
+                    onClick={() => setShowSessionDetails((value) => !value)}
+                  >
+                    {showSessionDetails ? "Hide details" : "Show details"}
+                  </button>
+                  <span className="pulse" />
+                  {selectedSession.stage === "idle" ? "Ready" : "Working…"}
+                </div>
+              </div>
+
+              <div className="messages">
+                {visibleSessionMessages.length === 0 ? (
+                  <div className="welcome">
+                    <div className="welcome-orbit">
+                      <div>⌁</div>
+                    </div>
+                    <h3>Ask the orchestrator for something</h3>
+                    <p>
+                      It will break your request into subtasks and delegate each to the right
+                      member Agent, then combine the results into one answer.
+                    </p>
+                  </div>
+                ) : (
+                  visibleSessionMessages.map((message) => (
+                    <article
+                      className={
+                        "message message-" +
+                        message.role +
+                        (message.kind === "comment" ? " message-comment" : "")
+                      }
+                      key={message.id}
+                    >
+                      <div className="message-meta">
+                        <strong>
+                          {partyLabel(selectedSession, message.senderId, {
+                            senderUserId: message.senderUserId,
+                            senderUsername: message.senderUsername,
+                            currentUserId: currentUser?.id,
+                          })}
+                        </strong>
+                        {message.kind === "comment" && <span className="message-recipient">comment</span>}
+                        {message.recipientId && message.recipientId !== message.senderId && (
+                          <span className="message-recipient">
+                            → {partyLabel(selectedSession, message.recipientId)}
+                          </span>
+                        )}
+                        <span>{formatTime(message.createdAt)}</span>
+                      </div>
+                      <div className="message-body">{message.content}</div>
+                    </article>
+                  ))
+                )}
+                {selectedSession.stage !== "idle" && selectedSession.stage !== "failed" && (
+                  <article className="message message-assistant thinking">
+                    <div className="message-meta">
+                      <strong>Orchestrator</strong>
+                      <span>{selectedSession.stage}…</span>
+                    </div>
+                    <div className="thinking-row">
+                      <Spinner />
+                      Routing and running the Session's Agents…
+                    </div>
+                  </article>
+                )}
+                {selectedSession.stage === "failed" && (
+                  <article className="run-error">
+                    <strong>Session failed</strong>
+                    <span>{selectedSession.lastError}</span>
+                  </article>
+                )}
+                <div ref={sessionMessageEnd} />
+              </div>
+
+              <form className="composer" onSubmit={sendSessionMessage}>
+                <div className="compose-mode-toggle">
+                  <button
+                    type="button"
+                    className={"button " + (composeMode === "task" ? "button-primary" : "button-ghost")}
+                    onClick={() => setComposeMode("task")}
+                  >
+                    Task
+                  </button>
+                  <button
+                    type="button"
+                    className={"button " + (composeMode === "comment" ? "button-primary" : "button-ghost")}
+                    onClick={() => setComposeMode("comment")}
+                  >
+                    Comment
+                  </button>
+                </div>
+                <textarea
+                  value={sessionPrompt}
+                  onChange={(event) => setSessionPrompt(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
+                      event.currentTarget.form?.requestSubmit();
+                    }
+                  }}
+                  placeholder={
+                    composeMode === "task"
+                      ? "Describe what the Session should get done…"
+                      : "Leave a note for your collaborators…"
+                  }
+                  disabled={composeMode === "task" && selectedSession.stage !== "idle"}
+                  rows={3}
+                />
+                <div className="composer-footer">
+                  <span>
+                    Enter to send · Shift + Enter for newline · {selectedSession.memberAgentIds.length}{" "}
+                    member Agent{selectedSession.memberAgentIds.length === 1 ? "" : "s"}
+                  </span>
+                  <button
+                    className="send-button"
+                    disabled={
+                      !sessionPrompt.trim() || (composeMode === "task" && selectedSession.stage !== "idle")
+                    }
+                    aria-label="Send message"
+                  >
+                    ↑
+                  </button>
+                </div>
+              </form>
+            </section>
+          </>
+        ) : (
+          <div className="no-agent">
+            <div className="no-agent-art">S</div>
+            <span className="eyebrow">Sessions</span>
+            <h1>Create a Session to route work across multiple Agents.</h1>
+            <p>
+              Add member Agents; the orchestrator will decompose each request and delegate to
+              them, kept separate from their own Playground conversations.
+            </p>
+            <button
+              className="button button-primary"
+              onClick={() => {
+                setSessionForm(emptySessionForm);
+                setShowCreateSession(true);
+              }}
+            >
+              Create your first Session
+            </button>
+          </div>
         )}
       </main>
 
@@ -660,6 +1380,88 @@ export default function App() {
               </button>
               <button className="button button-primary" disabled={busy}>
                 {busy ? <Spinner /> : "Create Agent"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {showCreateSession && (
+        <div className="modal-backdrop" onMouseDown={() => setShowCreateSession(false)}>
+          <form
+            className="modal"
+            onSubmit={createSession}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="modal-heading">
+              <div>
+                <span className="eyebrow">New Session</span>
+                <h2>Create a multi-agent Session</h2>
+                <p>
+                  A lightweight orchestrator will break each request into subtasks and route
+                  them only to the member Agents you pick below.
+                </p>
+              </div>
+              <button type="button" onClick={() => setShowCreateSession(false)}>×</button>
+            </div>
+            <label>
+              Name
+              <input
+                autoFocus
+                placeholder="Docs + Tests"
+                value={sessionForm.name}
+                onChange={(event) => setSessionForm({ ...sessionForm, name: event.target.value })}
+                required
+                maxLength={80}
+              />
+            </label>
+            <label>
+              Description
+              <input
+                placeholder="Writes docs and matching tests together"
+                value={sessionForm.description}
+                onChange={(event) =>
+                  setSessionForm({ ...sessionForm, description: event.target.value })
+                }
+                maxLength={500}
+              />
+            </label>
+            <div className="form-grid">
+              {agents.map((agent) => {
+                const checked = sessionForm.memberAgentIds.includes(agent.id);
+                return (
+                  <label key={agent.id} className="member-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() =>
+                        setSessionForm((current) => ({
+                          ...current,
+                          memberAgentIds: checked
+                            ? current.memberAgentIds.filter((id) => id !== agent.id)
+                            : [...current.memberAgentIds, agent.id],
+                        }))
+                      }
+                    />
+                    {agent.name}
+                  </label>
+                );
+              })}
+              {agents.length === 0 && <span>Create an Agent first.</span>}
+            </div>
+            <div className="modal-footer">
+              <button
+                type="button"
+                className="button button-ghost"
+                onClick={() => setShowCreateSession(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="button button-primary"
+                disabled={busy || sessionForm.memberAgentIds.length === 0}
+              >
+                {busy ? <Spinner /> : "Create Session"}
               </button>
             </div>
           </form>
