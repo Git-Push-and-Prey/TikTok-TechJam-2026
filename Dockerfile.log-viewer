@@ -1,0 +1,31 @@
+ARG NODE_IMAGE=node:22-bookworm-slim
+FROM ${NODE_IMAGE} AS build
+WORKDIR /app
+
+COPY package.json package-lock.json tsconfig.base.json ./
+COPY apps/server/package.json apps/server/package.json
+COPY apps/web/package.json apps/web/package.json
+COPY apps/log-viewer/package.json apps/log-viewer/package.json
+RUN npm ci
+
+COPY apps ./apps
+RUN npm run build -w @launchpad/log-viewer
+RUN npm prune --omit=dev
+
+FROM ${NODE_IMAGE} AS runtime
+ENV NODE_ENV=production
+WORKDIR /app
+
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/apps/log-viewer/package.json ./apps/log-viewer/package.json
+COPY --from=build /app/apps/log-viewer/dist ./apps/log-viewer/dist
+COPY --from=build /app/apps/log-viewer/public ./apps/log-viewer/public
+
+RUN mkdir -p /app/logs && chown -R node:node /app
+
+USER node
+EXPOSE 4100
+HEALTHCHECK --interval=20s --timeout=5s --start-period=10s --retries=5 \
+  CMD node -e "fetch('http://127.0.0.1:4100/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+
+CMD ["node", "apps/log-viewer/dist/index.js"]

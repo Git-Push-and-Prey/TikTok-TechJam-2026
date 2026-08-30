@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Session Log Viewer</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div id="unlock-screen" class="unlock-screen hidden">
+      <form id="unlock-form" class="unlock-card">
+        <h1>Session Log Viewer</h1>
+        <p>Enter the access token to view session logs.</p>
+        <input id="unlock-token" type="password" placeholder="Access token" autocomplete="off" />
+        <button type="submit">Unlock</button>
+        <p id="unlock-error" class="error hidden"></p>
+      </form>
+    </div>
+
+    <div id="app" class="app hidden">
+      <aside class="sidebar">
+        <header>
+          <h1>Sessions</h1>
+          <button id="refresh-btn" title="Refresh session list">&#8635;</button>
+        </header>
+        <input id="session-filter" type="text" placeholder="Filter by agent name or id…" />
+        <ul id="session-list" class="session-list"></ul>
+      </aside>
+
+      <main class="main">
+        <header class="main-header">
+          <div id="session-title">Select a session</div>
+          <div class="toolbar">
+            <input id="keyword-filter" type="text" placeholder="Filter this session by keyword…" disabled />
+            <label class="auto-refresh">
+              <input id="auto-refresh" type="checkbox" />
+              Auto-refresh
+            </label>
+          </div>
+        </header>
+        <div id="entries" class="entries">
+          <p class="empty-state">Pick a session on the left to view its log.</p>
+        </div>
+      </main>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

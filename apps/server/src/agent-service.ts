@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import type { AppConfig } from "./config.js";
 import type { CredentialService } from "./credential-service.js";
-import { isArkConfigured } from "./config.js";
-import { HttpError, RunCancelledError } from "./errors.js";
+import { isOpenRouterConfigured } from "./config.js";
+import { assertOwned, HttpError, RunCancelledError } from "./errors.js";
+import { SessionLogger, type SessionLogContext } from "./session-logger.js";
 import { JsonStore } from "./store.js";
 import type {
   Agent,
@@ -12,11 +14,29 @@ import type {
   Message,
   UpdateAgentInput,
 } from "./types.js";
+import { USER_PARTY } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
 
 const now = () => new Date().toISOString();
 
-export class AgentService {
+export interface SendMessageOptions {
+  /** Run against this directory instead of the Agent's own workspacePath (used by Session turns). */
+  workspaceOverride?: string;
+  /** Tags the created Message/AgentRun so it doesn't show up in the Agent's own Playground history. */
+  sessionId?: string;
+  /**
+   * When present, read/write the Codex thread id from here instead of the
+   * Agent's own `codexThreadId` — keeps a Session's conversation with an
+   * Agent separate from that Agent's solo Playground conversation.
+   */
+  session?: { threadId: string | null; onThreadId: (threadId: string | null) => void };
+  /** Who is sending this turn's prompt — USER_PARTY, SYSTEM_PARTY, or an Agent id. Defaults to USER_PARTY. */
+  sender?: string;
+  /** Who the reply is addressed to. Defaults to `sender` (a plain reply-to-sender exchange). */
+  recipient?: string;
+}
+
+export class AgentService extends EventEmitter {
   private readonly activeExecutions = new Map<string, Promise<void>>();
   private readonly cancellationRequests = new Set<string>();
 
@@ -25,12 +45,16 @@ export class AgentService {
     private readonly store: JsonStore,
     private readonly workspaces: WorkspaceManager,
     private readonly runner: AgentRunner,
+    private readonly sessionLogger: SessionLogger,
     private readonly credentials?: CredentialService,
-  ) {}
+  ) {
+    super();
+  }
 
   async initialize(): Promise<void> {
     await this.store.initialize();
     await this.workspaces.initialize();
+    await this.sessionLogger.initialize();
     await this.store.mutate((database) => {
       for (const run of database.runs) {
         if (run.status === "queued" || run.status === "running") {
@@ -48,21 +72,23 @@ export class AgentService {
     });
   }
 
-  listAgents(): Agent[] {
+  listAgents(ownerId: string): Agent[] {
     return this.store
       .snapshot()
-      .agents.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+      .agents.filter((agent) => agent.kind !== "orchestrator" && agent.ownerId === ownerId)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
-  getAgent(id: string): Agent {
+  getAgent(id: string, ownerId?: string | null): Agent {
     const agent = this.store.snapshot().agents.find((item) => item.id === id);
     if (!agent) {
       throw new HttpError(404, "Agent not found");
     }
+    assertOwned(agent.ownerId, ownerId, "Agent not found");
     return agent;
   }
 
-  async createAgent(input: CreateAgentInput): Promise<Agent> {
+  async createAgent(input: CreateAgentInput, ownerId: string | null): Promise<Agent> {
     const timestamp = now();
     const id = randomUUID();
     const agent: Agent = {
@@ -71,9 +97,11 @@ export class AgentService {
       description: input.description?.trim() ?? "",
       instructions: input.instructions?.trim() ?? "",
       status: "ready",
+      kind: input.kind ?? "user",
       workspacePath: this.workspaces.workspacePath(id),
       codexThreadId: null,
       lastError: null,
+      ownerId,
       createdAt: timestamp,
       updatedAt: timestamp,
     };
@@ -82,8 +110,32 @@ export class AgentService {
     return agent;
   }
 
-  async updateAgent(id: string, input: UpdateAgentInput): Promise<Agent> {
-    const current = this.getAgent(id);
+  /**
+   * Shares an Agent by cloning its definition (name/description/instructions)
+   * into a brand-new Agent owned by `targetUserId` — a fresh workspace and
+   * thread, no shared conversation history with the source.
+   */
+  async shareAgent(id: string, ownerId: string, targetUserId: string): Promise<Agent> {
+    const source = this.getAgent(id, ownerId);
+    if (source.kind === "orchestrator") {
+      throw new HttpError(400, "An orchestrator Agent cannot be shared");
+    }
+    return this.createAgent(
+      {
+        name: source.name,
+        description: source.description,
+        instructions: source.instructions,
+      },
+      targetUserId,
+    );
+  }
+
+  async updateAgent(
+    id: string,
+    input: UpdateAgentInput,
+    ownerId?: string | null,
+  ): Promise<Agent> {
+    const current = this.getAgent(id, ownerId);
     if (current.status === "busy") {
       throw new HttpError(409, "Stop the active run before editing this Agent");
     }
@@ -106,8 +158,11 @@ export class AgentService {
     return updated;
   }
 
-  async deleteAgent(id: string): Promise<{ archivedWorkspace: string }> {
-    const agent = this.getAgent(id);
+  async deleteAgent(
+    id: string,
+    ownerId?: string | null,
+  ): Promise<{ archivedWorkspace: string }> {
+    const agent = this.getAgent(id, ownerId);
     await this.cancelExecution(id);
     await this.credentials?.revokeAllForAgent(id);
     const archivedWorkspace = await this.workspaces.archive(agent);
@@ -119,52 +174,59 @@ export class AgentService {
     return { archivedWorkspace };
   }
 
-  async startAgent(id: string): Promise<Agent> {
-    return this.setStatus(id, "ready");
+  async startAgent(id: string, ownerId?: string | null): Promise<Agent> {
+    return this.setStatus(id, "ready", ownerId);
   }
 
-  async stopAgent(id: string): Promise<Agent> {
-    this.getAgent(id);
+  async stopAgent(id: string, ownerId?: string | null): Promise<Agent> {
+    this.getAgent(id, ownerId);
     await this.cancelExecution(id);
-    return this.setStatus(id, "stopped");
+    return this.setStatus(id, "stopped", ownerId);
   }
 
-  getMessages(agentId: string): Message[] {
-    this.getAgent(agentId);
+  getMessages(agentId: string, ownerId?: string | null): Message[] {
+    this.getAgent(agentId, ownerId);
     return this.store
       .snapshot()
-      .messages.filter((message) => message.agentId === agentId)
+      .messages.filter((message) => message.agentId === agentId && message.sessionId === null)
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
   }
 
-  getRun(runId: string): AgentRun {
-    const run = this.store.snapshot().runs.find((item) => item.id === runId);
+  getRun(runId: string, ownerId?: string | null): AgentRun {
+    const database = this.store.snapshot();
+    const run = database.runs.find((item) => item.id === runId);
     if (!run) {
       throw new HttpError(404, "Run not found");
     }
+    const agent = database.agents.find((item) => item.id === run.agentId);
+    assertOwned(agent?.ownerId ?? null, ownerId, "Run not found");
     return run;
   }
 
-  getRuns(agentId: string): AgentRun[] {
-    this.getAgent(agentId);
+  getRuns(agentId: string, ownerId?: string | null): AgentRun[] {
+    this.getAgent(agentId, ownerId);
     return this.store
       .snapshot()
-      .runs.filter((run) => run.agentId === agentId)
+      .runs.filter((run) => run.agentId === agentId && run.sessionId === null)
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   }
 
   async sendMessage(
     agentId: string,
     prompt: string,
+    ownerId?: string | null,
+    options?: SendMessageOptions,
   ): Promise<{ run: AgentRun; message: Message }> {
-    if (!isArkConfigured(this.config)) {
+    this.getAgent(agentId, ownerId);
+    if (!isOpenRouterConfigured(this.config)) {
       throw new HttpError(
         503,
-        "Ark is not configured. Set ARK_API_KEY and ARK_MODEL, then restart.",
+        "OpenRouter is not configured. Set OPENROUTER_API_KEY, then restart.",
       );
     }
     const timestamp = now();
     const runId = randomUUID();
+    const sessionId = options?.sessionId ?? null;
     const run: AgentRun = {
       id: runId,
       agentId,
@@ -173,16 +235,21 @@ export class AgentService {
       output: null,
       error: null,
       usage: null,
+      sessionId,
       startedAt: null,
       completedAt: null,
       createdAt: timestamp,
     };
+    const senderId = options?.sender ?? USER_PARTY;
     const message: Message = {
       id: randomUUID(),
       agentId,
       runId,
       role: "user",
       content: prompt,
+      sessionId,
+      senderId,
+      recipientId: agentId,
       createdAt: timestamp,
     };
     const agentAtStart = await this.store.mutate((database) => {
@@ -204,7 +271,11 @@ export class AgentService {
       storedAgent.updatedAt = timestamp;
       return snapshot;
     });
-    const execution = this.executeRun(agentAtStart, run);
+    void this.sessionLogger.logUserMessage(
+      { agentId, agentName: agentAtStart.name, runId, ownerId: agentAtStart.ownerId },
+      prompt,
+    );
+    const execution = this.executeRun(agentAtStart, run, options);
     this.activeExecutions.set(agentId, execution);
     void execution
       .finally(() => {
@@ -218,9 +289,9 @@ export class AgentService {
 
   async systemInfo(): Promise<Record<string, unknown>> {
     return {
-      arkConfigured: isArkConfigured(this.config),
-      arkBaseUrl: this.config.arkBaseUrl,
-      arkModel: this.config.arkModel || null,
+      openrouterConfigured: isOpenRouterConfigured(this.config),
+      openrouterBaseUrl: this.config.openrouterBaseUrl,
+      openrouterModel: this.config.openrouterModel || "openrouter/free",
       codexAvailable: await this.runner.isAvailable(),
       codexSandboxMode: this.config.codexSandboxMode,
       runtimeProvider: this.config.runtimeProvider,
@@ -235,7 +306,17 @@ export class AgentService {
     };
   }
 
-  private async executeRun(agentAtStart: Agent, run: AgentRun): Promise<void> {
+  private async executeRun(
+    agentAtStart: Agent,
+    run: AgentRun,
+    options?: SendMessageOptions,
+  ): Promise<void> {
+    const logContext: SessionLogContext = {
+      agentId: agentAtStart.id,
+      agentName: agentAtStart.name,
+      runId: run.id,
+      ownerId: agentAtStart.ownerId,
+    };
     await this.store.mutate((database) => {
       const storedRun = database.runs.find((item) => item.id === run.id);
       if (storedRun) {
@@ -249,15 +330,23 @@ export class AgentService {
       }
       const result = await this.runner.run({
         agentId: agentAtStart.id,
-        workspacePath: agentAtStart.workspacePath,
+        workspacePath: options?.workspaceOverride ?? agentAtStart.workspacePath,
         prompt: run.prompt,
-        threadId: agentAtStart.codexThreadId,
+        threadId: options?.session ? options.session.threadId : agentAtStart.codexThreadId,
+        onEvent: (event) => {
+          if (event.kind === "tool_call") {
+            void this.sessionLogger.logToolCall(logContext, event);
+          } else {
+            void this.sessionLogger.logError(logContext, event.message);
+          }
+        },
       });
+      void this.sessionLogger.logAgentResponse(logContext, result.output, result.usage);
       const completedAt = now();
-      await this.store.mutate((database) => {
+      const finalRun = await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === run.id);
         const agent = database.agents.find((item) => item.id === agentAtStart.id);
-        if (!storedRun || !agent) return;
+        if (!storedRun || !agent) return null;
         storedRun.status = "completed";
         storedRun.output = result.output;
         storedRun.usage = result.usage;
@@ -268,18 +357,31 @@ export class AgentService {
           runId: run.id,
           role: "assistant",
           content: result.output,
+          sessionId: run.sessionId,
+          senderId: agent.id,
+          recipientId: options?.recipient ?? options?.sender ?? USER_PARTY,
           createdAt: completedAt,
         });
         agent.status = "ready";
-        agent.codexThreadId = result.threadId;
+        if (options?.session) {
+          options.session.onThreadId(result.threadId);
+        } else {
+          agent.codexThreadId = result.threadId;
+        }
         agent.lastError = null;
         agent.updatedAt = completedAt;
+        return structuredClone(storedRun);
       });
+      if (finalRun) this.emit("run:settled", { agentId: agentAtStart.id, run: finalRun });
     } catch (error) {
       const completedAt = now();
       const cancelled = error instanceof RunCancelledError;
       const message = error instanceof Error ? error.message : String(error);
-      await this.store.mutate((database) => {
+      void this.sessionLogger.logError(
+        logContext,
+        cancelled ? "Run cancelled by user" : message,
+      );
+      const finalRun = await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === run.id);
         const agent = database.agents.find((item) => item.id === agentAtStart.id);
         if (storedRun) {
@@ -294,16 +396,23 @@ export class AgentService {
           agent.lastError = cancelled ? null : message;
           agent.updatedAt = completedAt;
         }
+        return storedRun ? structuredClone(storedRun) : null;
       });
+      if (finalRun) this.emit("run:settled", { agentId: agentAtStart.id, run: finalRun });
     }
   }
 
-  private async setStatus(id: string, status: Agent["status"]): Promise<Agent> {
+  private async setStatus(
+    id: string,
+    status: Agent["status"],
+    ownerId?: string | null,
+  ): Promise<Agent> {
     return this.store.mutate((database) => {
       const agent = database.agents.find((item) => item.id === id);
       if (!agent) {
         throw new HttpError(404, "Agent not found");
       }
+      assertOwned(agent.ownerId, ownerId, "Agent not found");
       if (status === "ready" && agent.status === "busy") {
         throw new HttpError(409, "Stop the active run before starting this Agent");
       }

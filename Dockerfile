@@ -5,6 +5,7 @@ WORKDIR /app
 COPY package.json package-lock.json tsconfig.base.json ./
 COPY apps/server/package.json apps/server/package.json
 COPY apps/web/package.json apps/web/package.json
+COPY apps/log-viewer/package.json apps/log-viewer/package.json
 RUN npm ci
 
 COPY apps ./apps
@@ -37,7 +38,7 @@ COPY --from=build /app/apps/server/package.json ./apps/server/package.json
 COPY --from=build /app/apps/server/dist ./apps/server/dist
 COPY --from=build /app/apps/web/dist ./apps/web/dist
 
-RUN mkdir -p /app/data /app/workspaces /app/codex-home \
+RUN mkdir -p /app/data /app/workspaces /app/codex-home /app/logs \
     && chown -R node:node /app
 
 USER node

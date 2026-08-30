@@ -74,6 +74,12 @@ body {
   padding: 0 12px;
 }
 
+.auth-card .field-hint {
+  margin: -10px 0 16px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
 button,
 input,
 textarea {
@@ -196,6 +202,34 @@ button {
 
 .create-button span {
   font-size: 19px;
+  font-weight: 400;
+}
+
+.view-toggle {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.view-toggle .button {
+  flex: 1;
+  justify-content: center;
+}
+
+.member-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+}
+
+.member-checkbox input {
+  width: auto;
+}
+
+.member-owner-tag {
+  color: var(--muted);
+  font-size: 10px;
   font-weight: 400;
 }
 
@@ -622,6 +656,20 @@ textarea:focus {
   gap: 6px;
 }
 
+.details-toggle {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 0;
+}
+
 .pulse {
   width: 6px;
   height: 6px;
@@ -791,6 +839,23 @@ textarea:focus {
   border-left: 2px solid #8a76e7;
 }
 
+.message-comment {
+  margin-left: 0;
+  max-width: 78%;
+}
+
+.message-comment .message-meta {
+  justify-content: flex-start;
+}
+
+.message-comment .message-body {
+  background: transparent;
+  border: 1px dashed var(--line);
+  color: var(--muted);
+  font-style: italic;
+  border-radius: 4px 13px 13px 13px;
+}
+
 .thinking {
   opacity: 0.82;
 }
@@ -829,6 +894,17 @@ textarea:focus {
   border-top: 1px solid #e1dfd8;
   padding: 13px max(22px, calc((100% - 800px) / 2)) 15px;
   background: #f8f7f3;
+}
+
+.compose-mode-toggle {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.compose-mode-toggle .button {
+  padding: 3px 10px;
+  font-size: 10px;
 }
 
 .composer textarea {

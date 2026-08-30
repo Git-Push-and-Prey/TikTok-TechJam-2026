@@ -2,15 +2,18 @@
 
 A minimal Agent platform for three-day middleware hackathons. It provides Agent
 CRUD, a browser Playground, persistent workspaces, and Codex CLI backed by the
-Volcengine Ark Responses API.
+OpenRouter API.
 
 Run it locally with Docker, Colima, or rootless Podman, or deploy it to
 Volcengine ECS.
 
 > [!WARNING]
-> This is a single-user proof of concept. It intentionally has no identity,
-> tracing, audit, or hardened sandbox middleware. Do not use production data or
-> credentials. See [SECURITY.md](SECURITY.md).
+> This is a hackathon proof of concept. Logged-in users each only see their
+> own Agents and Sessions, and anyone can self-register an account (there's
+> no invite/approval step), but there is no hardened sandbox middleware, no
+> RBAC, and session logs are only tagged with the owning user's id, not
+> access-controlled by it (still gated by an optional shared token). Do not
+> use production data or credentials. See [SECURITY.md](SECURITY.md).
 
 ## Screenshots
 
@@ -30,13 +33,15 @@ Volcengine ECS.
 - Persistent Agent workspaces and Codex sessions
 - Disposable Docker, Colima, or Podman container for each local turn
 - Docker and Terraform deployment paths for Volcengine ECS
+- Session-based logging (one file per Agent conversation) with a separately
+  hosted log viewer for filtering by session or keyword
 
 ## Requirements
 
 - Node.js 22+
 - npm 10+
 - Docker, Colima, or Podman
-- A Volcengine Ark API key and endpoint that supports the Responses API
+- An OpenRouter API key (free, no credit card, at https://openrouter.ai/keys)
 
 Codex CLI is included in the Runtime image and is not required on the host.
 
@@ -68,8 +73,7 @@ Skip this step when already working from the repository root.
 ### 3. Start the POC
 
 ```bash
-ARK_API_KEY=your-ark-api-key \
-ARK_MODEL=ep-your-endpoint-id \
+OPENROUTER_API_KEY=your-openrouter-api-key \
 npm run poc
 ```
 
@@ -87,10 +91,11 @@ xdg-open http://localhost:3000   # Linux desktop
 
 In the Web UI:
 
-1. Select **Create Agent**.
-2. Enter a name, description, and workspace instructions.
-3. Select **Create Agent** again.
-4. Enter a task in the Playground, for example:
+1. Select **Need an account? Sign up** and create a username/password.
+2. Select **Create Agent**.
+3. Enter a name, description, and workspace instructions.
+4. Select **Create Agent** again.
+5. Enter a task in the Playground, for example:
 
    ```text
    Create a TypeScript hello-world CLI, add a test, and run it.
@@ -141,8 +146,7 @@ Force Podman when multiple engines are installed:
 
 ```bash
 CONTAINER_ENGINE=podman \
-ARK_API_KEY=your-ark-api-key \
-ARK_MODEL=ep-your-endpoint-id \
+OPENROUTER_API_KEY=your-openrouter-api-key \
 npm run poc
 ```
 
@@ -162,9 +166,7 @@ Create and edit the configuration:
 Required values in `.env`:
 
 ```dotenv
-ARK_API_KEY=your-ark-api-key
-ARK_MODEL=ep-your-endpoint-id
-APP_AUTH_TOKEN=replace-with-at-least-24-random-characters
+OPENROUTER_API_KEY=your-openrouter-api-key
 ```
 
 Start the application:
@@ -173,7 +175,8 @@ Start the application:
 docker compose up --build
 ```
 
-Open <http://localhost:3000>. Stop it without deleting Agent data:
+Open <http://localhost:3000> and select **Need an account? Sign up** to
+create a login. Stop it without deleting Agent data:
 
 ```bash
 docker compose down
@@ -197,7 +200,28 @@ Use local paths in `.env` when running outside Docker:
 APP_DATA_DIR=.data
 AGENT_WORKSPACE_ROOT=workspaces
 CODEX_HOME=codex-home
+LOGS_DIR=logs
 ```
+
+Open the Web UI and select **Need an account? Sign up** to create a login.
+Alternatively, provision one without the browser — this reads/writes
+`APP_DATA_DIR` directly, so run it with the server stopped (or before
+starting it for the first time):
+
+```bash
+APP_DATA_DIR=.data npm run create-user -w @launchpad/server -- alice a-strong-password
+```
+
+### Session logs
+
+Every Agent conversation is written to its own append-only JSONL file under
+`LOGS_DIR` (`<agentId>.log`): each line is a user message, tool call, agent
+response, or error, in order. `npm run dev` also starts a separately hosted
+log viewer at <http://localhost:4100> (`apps/log-viewer`) that lists sessions
+and lets you filter one by keyword. It reads `LOGS_DIR` directly, so it can
+be deployed on its own — see [Docker Compose](#docker-compose) for running it
+alongside the main app, and [docs/SESSION_LOGGING.md](docs/SESSION_LOGGING.md)
+for how it works end to end.
 
 ## Deployment
 
@@ -224,10 +248,9 @@ cp deploy/volcengine/terraform.tfvars.example \
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `ARK_API_KEY` | Required | Ark model API key. |
-| `ARK_MODEL` | Required | Responses-capable endpoint or model ID. |
-| `ARK_BASE_URL` | Beijing v3 endpoint | Ark OpenAI-compatible API URL. |
-| `APP_AUTH_TOKEN` | Empty on loopback | Shared demo token; use 24+ random characters remotely. |
+| `OPENROUTER_API_KEY` | Required | OpenRouter API key (free tier available, no credit card). |
+| `OPENROUTER_MODEL` | `openrouter/free` | OpenRouter model slug; the default auto-routes to a free, tool-calling-capable model. |
+| `OPENROUTER_BASE_URL` | OpenRouter API endpoint | OpenRouter API base URL. |
 | `AGENT_CREDENTIAL_MASTER_KEY` | Empty (credential APIs disabled) | Base64-encoded 32-byte AES-256-GCM master key for AgentKey credentials. |
 | `AGENT_CREDENTIAL_TTL_MS` | `2592000000` | Agent credential lifetime in milliseconds. |
 | `AGENT_CREDENTIAL_OVERLAP_MS` | `300000` | Old-key grace period during credential rotation. |
@@ -235,6 +258,8 @@ cp deploy/volcengine/terraform.tfvars.example \
 | `CODEX_SANDBOX_MODE` | `workspace-write` | Codex inner sandbox mode. |
 | `CODEX_TIMEOUT_MS` | `600000` | Maximum duration of one turn. |
 | `LOCAL_POC_DATA_ROOT` | Platform-specific | Local metadata, workspace, and session directory. |
+| `LOGS_DIR` | `./logs` | Session log directory, shared between the server and the log viewer. |
+| `LOG_VIEWER_AUTH_TOKEN` | Empty | Shared token gating the log viewer's API when set. |
 
 See [.env.example](.env.example) for all Runtime and resource-limit options.
 
@@ -266,8 +291,8 @@ flowchart LR
     API --> Runtime{"Runtime provider"}
     Runtime -->|Local POC| Container["Disposable Docker / Colima / Podman container"]
     Runtime -->|ECS profile| Codex["Codex CLI in application container"]
-    Container --> Ark["Volcengine Ark Responses API"]
-    Codex --> Ark
+    Container --> OpenRouter["OpenRouter API"]
+    Codex --> OpenRouter
 ```
 
 The first turn uses `codex exec`; later turns resume the stored Codex thread.
@@ -287,6 +312,9 @@ docker compose config
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
+- [Multi-user login, sharing, and collaboration](docs/MULTI_USER_COLLABORATION.md)
+- [Multi-agent Sessions](docs/MULTI_AGENT_SESSIONS.md)
+- [Session logging architecture](docs/SESSION_LOGGING.md)
 - [Local POC](docs/LOCAL_POC.md)
 - [Deployment](docs/DEPLOYMENT.md)
 - [Hackathon extension guide](docs/HACKATHON_EXTENSION_GUIDE.md)

@@ -6,6 +6,7 @@ import { RunCancelledError } from "./errors.js";
 import type {
   AgentRunner,
   RunUsage,
+  RunnerEvent,
   RunnerRequest,
   RunnerResult,
 } from "./types.js";
@@ -41,7 +42,18 @@ export function buildCodexArgs(
   return args;
 }
 
-export function parseCodexEventLine(line: string, parsed: ParsedEvents): void {
+function summarizeItem(item: Record<string, unknown>): string {
+  if (typeof item.command === "string") return item.command;
+  if (Array.isArray(item.changes)) return item.changes.length + " file(s) changed";
+  if (typeof item.text === "string") return item.text;
+  return String(item.type ?? "item");
+}
+
+export function parseCodexEventLine(
+  line: string,
+  parsed: ParsedEvents,
+  onEvent?: (event: RunnerEvent) => void,
+): void {
   let event: Record<string, unknown>;
   try {
     event = JSON.parse(line) as Record<string, unknown>;
@@ -57,6 +69,22 @@ export function parseCodexEventLine(line: string, parsed: ParsedEvents): void {
     const item = event.item as Record<string, unknown>;
     if (item.type === "agent_message" && typeof item.text === "string") {
       parsed.messages.push(item.text);
+    } else {
+      const status =
+        typeof item.status === "string"
+          ? item.status
+          : item.exit_code === 0
+            ? "succeeded"
+            : item.exit_code !== undefined
+              ? "failed"
+              : "completed";
+      onEvent?.({
+        kind: "tool_call",
+        itemType: String(item.type ?? "item"),
+        status,
+        summary: summarizeItem(item),
+        detail: item,
+      });
     }
   }
 
@@ -83,6 +111,7 @@ export function parseCodexEventLine(line: string, parsed: ParsedEvents): void {
           ? event.error
           : "Codex reported an unknown error";
     parsed.errors.push(message);
+    onEvent?.({ kind: "error", message });
   }
 }
 
@@ -187,7 +216,7 @@ export class CodexRunner implements AgentRunner {
         const lines = stdout.split(/\r?\n/);
         stdout = lines.pop() ?? "";
         for (const line of lines) {
-          parseCodexEventLine(line, parsed);
+          parseCodexEventLine(line, parsed, request.onEvent);
         }
       } else {
         stderr += chunk.toString("utf8");
@@ -212,7 +241,7 @@ export class CodexRunner implements AgentRunner {
         child.once("close", (code) => resolve(code ?? 1));
       });
       if (stdout.trim()) {
-        parseCodexEventLine(stdout.trim(), parsed);
+        parseCodexEventLine(stdout.trim(), parsed, request.onEvent);
       }
       if (active.cancelled) {
         throw new RunCancelledError();
@@ -274,7 +303,7 @@ export class CodexRunner implements AgentRunner {
     ] as const;
     const environment: NodeJS.ProcessEnv = {
       CODEX_HOME: this.config.codexHome,
-      ARK_API_KEY: this.config.arkApiKey,
+      OPENROUTER_API_KEY: this.config.openrouterApiKey,
       NO_COLOR: "1",
     };
     for (const name of inheritedNames) {

@@ -18,6 +18,7 @@ services:
       APP_DATA_DIR: /app/data
       AGENT_WORKSPACE_ROOT: /app/workspaces
       CODEX_HOME: /app/codex-home
+      LOGS_DIR: /app/logs
       CODEX_SANDBOX_MODE: ${CODEX_SANDBOX_MODE:-workspace-write}
     ports:
       - "${PUBLIC_PORT:-3000}:3000"
@@ -25,6 +26,7 @@ services:
       - ./data:/app/data
       - ./workspaces:/app/workspaces
       - ./codex-home:/app/codex-home
+      - ./logs:/app/logs
     init: true
     security_opt:
       - no-new-privileges:true
@@ -33,3 +35,30 @@ services:
     pids_limit: 512
     mem_limit: 4g
     cpus: 2
+
+  log-viewer:
+    build:
+      context: .
+      dockerfile: Dockerfile.log-viewer
+      args:
+        NODE_IMAGE: ${CONTAINER_RUNTIME_BASE_IMAGE:-node:22-bookworm-slim}
+    image: volc-agent-log-viewer:local
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 4100
+      LOGS_DIR: /app/logs
+      LOG_VIEWER_AUTH_TOKEN: ${LOG_VIEWER_AUTH_TOKEN:-}
+    ports:
+      - "${LOG_VIEWER_PORT:-4100}:4100"
+    volumes:
+      - ./logs:/app/logs:ro
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1

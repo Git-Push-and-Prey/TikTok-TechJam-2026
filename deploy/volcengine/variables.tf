@@ -59,29 +59,20 @@ variable "repository_ref" {
   default     = "main"
 }
 
-variable "ark_api_key" {
-  description = "Volcengine Ark API key. Supplied through TF_VAR_ark_api_key."
+variable "openrouter_api_key" {
+  description = "OpenRouter API key. Supplied through TF_VAR_openrouter_api_key."
   type        = string
   sensitive   = true
 }
 
-variable "app_auth_token" {
-  description = "Shared browser/API demo token. Supplied through TF_VAR_app_auth_token."
+variable "openrouter_model" {
+  description = "OpenRouter model slug, for example openrouter/free."
   type        = string
-  sensitive   = true
-  validation {
-    condition     = length(var.app_auth_token) >= 24 && length(var.app_auth_token) <= 128 && can(regex("^[A-Za-z0-9._~-]+$", var.app_auth_token)) && !startswith(var.app_auth_token, "replace-")
-    error_message = "app_auth_token must contain 24-128 URL-safe, non-placeholder characters."
-  }
+  default     = "openrouter/free"
 }
 
-variable "ark_model" {
-  description = "Ark endpoint/model ID supporting the Responses API."
+variable "openrouter_base_url" {
+  description = "OpenRouter API base URL."
   type        = string
-}
-
-variable "ark_base_url" {
-  description = "Ark OpenAI-compatible API base URL."
-  type        = string
-  default     = "https://ark.ap-southeast.bytepluses.com/api/v3"
+  default     = "https://openrouter.ai/api/v1"
 }
