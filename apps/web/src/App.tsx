@@ -382,6 +382,27 @@ export default function App() {
     }
   };
 
+  const exportConversation = useCallback(() => {
+    if (!selected || messages.length === 0) return;
+
+    const lines = [`# ${selected.name} — Conversation\n`];
+    for (const message of messages) {
+      const sender = message.role === "user" ? "You" : selected.name;
+      lines.push(`**${sender}:**\n\n${message.content}\n`);
+    }
+    const markdown = lines.join("\n");
+
+    const blob = new Blob([markdown], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${selected.name}-conversation.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, [selected, messages]);
+
   const pollRun = async (runId: string, agentId: string) => {
     if (pollingRunIds.current.has(runId)) return;
     pollingRunIds.current.add(runId);
@@ -856,6 +877,13 @@ export default function App() {
                   disabled={busy}
                 >
                   Share
+                </button>
+                <button
+                  className="button button-ghost"
+                  onClick={exportConversation}
+                  disabled={busy || messages.length === 0}
+                >
+                  Export
                 </button>
                 <button
                   className="button button-danger"
