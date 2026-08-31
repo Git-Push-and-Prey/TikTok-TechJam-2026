@@ -399,6 +399,23 @@ describe("Per-owner isolation", () => {
       service.sendMessage(agent.id, "hi", OTHER_OWNER),
     ).rejects.toMatchObject({ statusCode: 404 });
   });
+
+  it("blocks message retrieval from a non-owner", async () => {
+    const service = await makeService();
+    const agent = await service.createAgent({ name: "Secret" }, OWNER);
+    expect(() => service.getMessages(agent.id, OTHER_OWNER)).toThrow(
+      expect.objectContaining({ statusCode: 404 }),
+    );
+  });
+
+  it("allows the owner to retrieve their own messages", async () => {
+    const service = await makeService();
+    const agent = await service.createAgent({ name: "Mine" }, OWNER);
+    await service.sendMessage(agent.id, "my task", OWNER);
+    const messages = service.getMessages(agent.id, OWNER);
+    expect(messages.length).toBeGreaterThanOrEqual(1);
+    expect(messages[0].role).toBe("user");
+  });
 });
 
 describe("Sharing an Agent (clone)", () => {
