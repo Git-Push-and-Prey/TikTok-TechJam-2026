@@ -384,6 +384,11 @@ export default function App() {
 
   const exportConversation = useCallback(() => {
     if (!selected || messages.length === 0) return;
+    // Authorization check: only the agent owner can export conversations
+    if (selected.ownerId !== currentUser?.id) {
+      setError("You can only export conversations from your own Agents.");
+      return;
+    }
 
     const lines = [`# ${selected.name} — Conversation\n`];
     for (const message of messages) {
@@ -401,7 +406,7 @@ export default function App() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  }, [selected, messages]);
+  }, [selected, messages, currentUser?.id]);
 
   const pollRun = async (runId: string, agentId: string) => {
     if (pollingRunIds.current.has(runId)) return;
