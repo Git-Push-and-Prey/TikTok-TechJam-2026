@@ -17,10 +17,26 @@ credentials, personal data, or exploit details in an issue.
   create an account and get Codex execution via their own Agents. No
   password reset.
 - No RBAC — every logged-in user has identical permissions over their own
-  Agents and Sessions; no shared/collaborative access between users
+  resources. Sessions do support real collaboration (an owner plus
+  collaborators with full participate rights, see
+  [MULTI_USER_COLLABORATION.md](docs/MULTI_USER_COLLABORATION.md)) and an
+  Agent can be shared to another user, but sharing clones it rather than
+  granting live access to the original. There is no admin role and no way
+  to grant less than full rights over what a user does have access to.
 - Session logs (`logs/<agentId>.log`) carry the owning user's id per entry
   but are not access-controlled by it — reading them is still only gated by
   an optional shared token, independent of per-user login
+- Per-Agent execution guardrails (`maxExecutionSteps`, `maxExecutionTimeoutMs`,
+  see [middleware/execution-guardrail.ts](apps/server/src/middleware/execution-guardrail.ts))
+  cap how many tool calls a single Run can make and how long it can run
+  before the platform cancels it. This bounds a runaway *Run*; it is not a
+  CPU/memory/process sandbox — see the container limits below for that.
+- [authorization.middleware.ts](apps/server/src/authorization.middleware.ts)
+  and [agent-identity.ts](apps/server/src/agent-identity.ts) implement a
+  role-based (Planner/Executor/Reviewer/Orchestrator) authorization policy
+  engine, but neither is called from any route, service, or Runner yet.
+  Treat it as unshipped design, not an active control, until something in
+  the request path actually calls `authorize()`/`executeProtectedAction()`.
 - No CSRF protection
 - No per-Agent container boundary in ECS mode
 - Ordinary local containers, not hardened multi-tenant sandboxes

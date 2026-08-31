@@ -25,6 +25,8 @@ const createAgentBody = z.object({
   name: z.string().trim().min(1).max(80),
   description: z.string().max(500).optional(),
   instructions: z.string().max(10_000).optional(),
+  maxExecutionSteps: z.number().int().positive().optional(),
+  maxExecutionTimeoutMs: z.number().int().positive().optional(),
 });
 const updateAgentBody = createAgentBody.partial().refine(
   (value) => Object.keys(value).length > 0,

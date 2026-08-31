@@ -43,10 +43,15 @@ interface AuthToken {
 ```
 
 Both live in the same `JsonStore`-backed `Database` as everything else
-(`Database.version` is `3`; `users`/`authTokens` were added in the v2→v3
+(`Database.version` is `4`; `users`/`authTokens` were added in the v2→v3
 migration in [store.ts](../apps/server/src/store.ts), alongside
 `ownerId`/`collaboratorIds` being backfilled as `null`/absent on existing
-rows).
+rows; `credentials`/`credentialAuditEvents` were added in a later v3→v4
+migration for the Agent credential lifecycle). `JsonStore.initialize()` also
+backfills `Agent.maxExecutionSteps`/`maxExecutionTimeoutMs` on every load
+regardless of stored version, for the execution-guardrail feature — a
+normalization step rather than a version bump, since both fields have safe
+defaults.
 
 ### Password and token handling — `apps/server/src/auth.ts`
 
