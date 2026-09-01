@@ -10,6 +10,8 @@ flowchart LR
     Auth --> Store["JSON store"]
     Service --> Store
     Service --> Workspace["Agent workspace"]
+    Service --> Guardrail["ExecutionGuardrail\n(step + timeout cap per Run)"]
+    Guardrail -.->|cancels on breach| Runner
     Service --> Runner{"AgentRunner"}
     Runner -->|Local POC| Container["Disposable Runtime container"]
     Runner -->|ECS| Process["Codex child process"]
@@ -53,7 +55,12 @@ server can create an account (see [SECURITY.md](../SECURITY.md)).
 ### AgentService
 
 Coordinates lifecycle state, persistence, workspaces, and Runs, scoped by
-`Agent.ownerId`. One Agent can have only one active Run.
+`Agent.ownerId`. One Agent can have only one active Run. Every Run is
+wrapped in an `ExecutionGuardrail`
+([middleware/execution-guardrail.ts](../apps/server/src/middleware/execution-guardrail.ts))
+that counts tool-call events against `Agent.maxExecutionSteps` and enforces
+`Agent.maxExecutionTimeoutMs`; crossing either cancels the Run via the
+Runner and marks it `failed`.
 
 ```text
 ready -> busy -> ready
@@ -141,7 +148,7 @@ limitations.
 | --- | --- | --- |
 | Glass Box | `AgentRunner`, `AgentRun` | Emit and display correlated execution events. |
 | Bouncer | `AuthService`, RBAC | Login, self-service signup, per-owner Agent scoping, and Session collaborators exist; add Agent-level sharing beyond clone, invite-gated signup, and per-user log access. |
-| Kill Switch | `AgentRunner` | Add threat-specific policy or a stronger sandbox. |
+| Kill Switch | `AgentService`, `ExecutionGuardrail` | Per-Run step and timeout caps now cancel a runaway Run (see `middleware/execution-guardrail.ts`). A role-based policy engine (`authorization.middleware.ts`, `agent-identity.ts`) also exists in the tree but is **not yet called from any route, service, or Runner** — wiring `executeProtectedAction()` into `AgentService.executeRun`'s `onEvent` handler, the same seam the guardrail already uses, is the natural next step. |
 
 The current container or ECS instance is the POC trust boundary. Ordinary
 containers are not hardened multi-tenant isolation.

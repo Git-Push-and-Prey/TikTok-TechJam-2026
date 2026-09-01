@@ -278,13 +278,17 @@ export interface Session {
 }
 ```
 
-`Database.version` is `3`; `JsonStore.initialize()` migrates older files in
+`Database.version` is `4`; `JsonStore.initialize()` migrates older files in
 place on load (v1 backfills `agents[].kind`, `messages[]`/`runs[]`
 `.sessionId`, adds `sessions: []`; v2 adds `ownerId: null` to existing
-`agents[]`/`sessions[]` plus empty `users[]`/`authTokens[]`) rather than
-rejecting them, so existing local data survives the upgrade. `senderId`/
-`recipientId` were added between v1 and v2 and are optional for the same
-reason — no further version bump needed for those.
+`agents[]`/`sessions[]` plus empty `users[]`/`authTokens[]`; v3 adds empty
+`credentials: []`/`credentialAuditEvents: []` for the Agent credential
+lifecycle) rather than rejecting them, so existing local data survives the
+upgrade. `senderId`/`recipientId` were added between v1 and v2 and are
+optional for the same reason — no further version bump needed for those.
+Separately, `Agent.maxExecutionSteps`/`maxExecutionTimeoutMs` (the
+execution-guardrail feature) are backfilled on every load regardless of
+stored version, not tied to a version bump at all.
 
 ## Known limitations
 

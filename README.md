@@ -35,6 +35,15 @@ Volcengine ECS.
 - Docker and Terraform deployment paths for Volcengine ECS
 - Session-based logging (one file per Agent conversation) with a separately
   hosted log viewer for filtering by session or keyword
+- Multi-user accounts with per-owner scoping of Agents and Sessions, plus
+  clone-based Agent sharing between users
+- Multi-agent Sessions: a roster of existing Agents fronted by a hidden,
+  lightweight delegating orchestrator, with human collaborators who can
+  contribute their own Agents to the roster
+- Optional per-Agent credential lifecycle (`AgentKey`) so an Agent can
+  authenticate on its own, without a human session token
+- Per-Agent execution guardrails (max tool-call steps and a timeout) that
+  cancel a Run before it runs away
 
 ## Requirements
 
@@ -281,6 +290,25 @@ Authorization: AgentKey agent_key_<keyId>.<secret>
 The server validates the key, Agent ID, status, expiry, and rotation overlap
 before calling `AgentService.sendMessage()`. Existing browser/shared-token
 operation is unchanged.
+
+## Execution guardrails
+
+Every Agent has a `maxExecutionSteps` (default `10`) and
+`maxExecutionTimeoutMs` (default `60000`) budget. `AgentService` counts every
+tool-call event a Run reports and starts a matching timeout; crossing either
+limit cancels the Runtime process and marks the Run `failed` with an
+`Execution guardrail triggered: ...` error instead of letting it run
+indefinitely. Set either field when creating or updating an Agent:
+
+```bash
+curl -X POST http://localhost:3000/api/agents \
+  -H "Authorization: Bearer <token>" -H 'Content-Type: application/json' \
+  -d '{"name":"Docs Bot","maxExecutionSteps":25,"maxExecutionTimeoutMs":120000}'
+```
+
+This is a per-Run behavioral cap, not a resource sandbox — it works
+alongside, not instead of, the container CPU/memory/PID limits described in
+[docs/LOCAL_POC.md](docs/LOCAL_POC.md).
 
 ## How it works
 
